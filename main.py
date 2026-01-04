@@ -838,6 +838,7 @@ class CameraThread(QThread):
         self.running = False
         self.recording = False
         self.video_writer = None
+        self._writer_lock = threading.Lock()
         self.cap = None
         self.reconnect_delay = 3  # Sekunden zwischen Reconnects
         self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
@@ -913,8 +914,13 @@ class CameraThread(QThread):
                 self.frame_ready.emit(frame.copy(), self.camera_id)
             
             # Aufzeichnung (alle Frames)
-            if self.recording and self.video_writer:
-                self.video_writer.write(frame)
+            with self._writer_lock:
+                if self.recording and self.video_writer is not None:
+                    try:
+                        self.video_writer.write(frame)
+                    except Exception:
+                        # Don't crash the streaming thread due to writer issues.
+                        pass
             
             # CPU-Schonung: Kleine Pause
             self.msleep(33)  # ~30 FPS
@@ -924,32 +930,64 @@ class CameraThread(QThread):
         if self.cap:
             self.cap.release()
             self.cap = None
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
+        with self._writer_lock:
+            if self.video_writer:
+                self.video_writer.release()
+                self.video_writer = None
+            self.recording = False
     
     def start_recording(self, output_path):
         """Starte Aufzeichnung"""
-        if self.cap and self.cap.isOpened():
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            fps = int(self.cap.get(cv2.CAP_PROP_FPS)) or 25
+        if not (self.cap and self.cap.isOpened()):
+            return None
+
+        with self._writer_lock:
+            if self.recording and self.video_writer is not None:
+                return None
+
+            # Ensure any previous writer is closed before re-opening
+            if self.video_writer is not None:
+                try:
+                    self.video_writer.release()
+                except Exception:
+                    pass
+                self.video_writer = None
+
+            fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+            if not fps or fps <= 0 or fps > 120:
+                fps = 25.0
             width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            
+            if width <= 0 or height <= 0:
+                width, height = 640, 480
+
+            os.makedirs(output_path, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"{output_path}/camera_{self.camera_id}_{timestamp}.mp4"
-            
-            self.video_writer = cv2.VideoWriter(filename, fourcc, fps, (width, height))
+
+            # Some streams behave badly with MPEG4/XVID timestamping (invalid PTS).
+            # MJPG-in-AVI is usually more tolerant.
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            filename = os.path.join(output_path, f"camera_{self.camera_id}_{timestamp}.avi")
+
+            vw = cv2.VideoWriter(filename, fourcc, fps, (width, height))
+            if not vw.isOpened():
+                return None
+
+            self.video_writer = vw
             self.recording = True
             return filename
         return None
     
     def stop_recording(self):
         """Stoppe Aufzeichnung"""
-        self.recording = False
-        if self.video_writer:
-            self.video_writer.release()
-            self.video_writer = None
+        with self._writer_lock:
+            self.recording = False
+            if self.video_writer:
+                try:
+                    self.video_writer.release()
+                except Exception:
+                    pass
+                self.video_writer = None
     
     def stop(self):
         """Thread stoppen"""
@@ -1433,8 +1471,15 @@ class MainWindow(QMainWindow):
         widget.stream_toggled.connect(self.toggle_camera_stream)
         widget.clicked.connect(self.select_camera)
         widget.snapshot_requested.connect(self.save_camera_snapshot)
+        widget.record_btn.clicked.connect(lambda checked, cid=camera_id, w=widget: self._on_record_btn_clicked(cid, w, checked))
         self.camera_widgets[camera_id] = widget
         return widget
+
+    def _on_record_btn_clicked(self, camera_id: int, widget: CameraWidget, checked: bool):
+        thread = self.camera_threads.get(camera_id)
+        if thread is None:
+            return
+        self.toggle_camera_recording(thread, widget, checked)
     
     def show_discovery_dialog(self):
         """Kamera-Suche Dialog anzeigen"""
@@ -1771,13 +1816,6 @@ class MainWindow(QMainWindow):
             # Signals verbinden
             thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
             thread.connection_status.connect(lambda connected, cid, msg: self.update_camera_status(connected, cid, msg))
-            
-            # Aufnahme-Button verbinden
-            if camera_id in self.camera_widgets:
-                widget = self.camera_widgets[camera_id]
-                widget.record_btn.clicked.connect(
-                    lambda checked, t=thread, w=widget: self.toggle_camera_recording(t, w, checked)
-                )
             
             # Thread starten (parallel)
             thread.start()
