@@ -36,6 +36,64 @@ python3 main.py
 
 ## Configure Cameras
 
+## Configuration File (`camera_config.json`)
+
+This app stores your local setup in `camera_config.json`.
+
+You usually **do not need to create this file manually**:
+
+- The app will **create and update** `camera_config.json` automatically when you add/edit/remove cameras via the GUI.
+- Auto-Discover results are stored there as well.
+- Reordering cameras via drag & drop updates the stored order.
+
+Manual editing is optional (e.g. to bulk-edit RTSP URLs or names).
+
+- The file is **gitignored** because it can contain **credentials** inside RTSP URLs.
+- Use `camera_config.json.example` as a safe template and create your local config from it.
+
+### Create your local config
+
+```bash
+cp camera_config.json.example camera_config.json
+```
+
+Then edit `camera_config.json` and replace IPs / usernames / passwords.
+
+### Schema
+
+- **`cameras`**
+  - List of camera objects, in the exact order they appear on the left.
+  - **`id`** must be unique.
+  - **`url`** is the RTSP URL.
+  - **`name`** is the display name.
+- **`recording_path`**
+  - Target directory for recordings.
+- **`next_camera_id`**
+  - Internal counter for assigning new IDs.
+- **`language`**
+  - UI language (`de` or `en`).
+- **`order_custom`**
+  - `false`: default sort by `id` on startup.
+  - `true`: keep the stored order from the file (after you reorder via drag & drop).
+
+Example snippet:
+
+```json
+{
+  "cameras": [
+    {
+      "id": 1,
+      "url": "rtsp://USER:PASS@192.168.1.100:554/h264Preview_01_main",
+      "name": "Camera 1"
+    }
+  ],
+  "recording_path": "/home/USER/Videos/Reolink",
+  "next_camera_id": 2,
+  "language": "de",
+  "order_custom": false
+}
+```
+
 ### Add camera manually
 
 1. Enter the camera RTSP URL
