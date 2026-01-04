@@ -18,8 +18,10 @@
 
 ## Requirements
 
-- Python 3
+- Python 3.12 (tested)
 - Dependencies listed in `requirements.txt`
+
+It is recommended to use a virtual environment (venv).
 
 If you install dependencies via your distro packages (recommended in Docker/managed envs), ensure at least:
 
@@ -31,6 +33,9 @@ If you install dependencies via your distro packages (recommended in Docker/mana
 ## Run
 
 ```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 python3 main.py
 ```
 
