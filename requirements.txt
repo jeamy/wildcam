@@ -1,0 +1,14 @@
+# Qt6 GUI Framework
+PyQt6>=6.6.0
+
+# OpenCV für Video-Streaming
+opencv-python>=4.8.0
+
+# NumPy für Array-Operationen
+numpy>=1.24.0
+
+# HTTP Requests für Kamera-API
+requests>=2.31.0
+
+# Optional: Bessere Performance mit opencv-contrib
+# opencv-contrib-python>=4.8.0
