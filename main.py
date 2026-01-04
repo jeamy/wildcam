@@ -18,6 +18,7 @@ import requests
 from requests.auth import HTTPDigestAuth
 import ipaddress
 import threading
+from urllib.parse import urlparse
 
 try:
     import sip  # type: ignore
@@ -79,6 +80,7 @@ TRANSLATIONS = {
         "camera.status.offline": "Offline",
         "camera.status.stopped": "Gestoppt",
         "camera.status.connected": "Verbunden",
+        "camera.status.sleep": "Sleep/Offline",
         "camera.default_name.id": "Kamera {id}",
         "camera.default_name.ip": "Kamera {ip}",
         "camera.meta.unknown": "Unbekannt",
@@ -182,6 +184,7 @@ TRANSLATIONS = {
         "camera.status.offline": "Offline",
         "camera.status.stopped": "Stopped",
         "camera.status.connected": "Connected",
+        "camera.status.sleep": "Sleep/Offline",
         "camera.default_name.id": "Camera {id}",
         "camera.default_name.ip": "Camera {ip}",
         "camera.meta.unknown": "Unknown",
@@ -251,6 +254,41 @@ def tr(key: str, **kwargs) -> str:
         return s.format(**kwargs)
     except Exception:
         return s
+
+
+def _parse_rtsp_url(rtsp_url: str):
+    """Best-effort RTSP URL parsing (host/port/user/pass)."""
+    try:
+        u = urlparse(rtsp_url)
+        host = u.hostname
+        port = u.port or 554
+        user = u.username
+        password = u.password
+        return host, port, user, password
+    except Exception:
+        return None, 554, None, None
+
+
+def _tcp_probe(host: str, port: int, timeout: float = 0.7) -> tuple[bool, str]:
+    """Fast TCP reachability check.
+
+    Returns (ok, reason) where reason is one of: ok, timeout, refused, unreachable, error.
+    """
+    if not host:
+        return False, "error"
+    try:
+        sock = socket.create_connection((host, int(port)), timeout=timeout)
+        sock.close()
+        return True, "ok"
+    except ConnectionRefusedError:
+        return False, "refused"
+    except TimeoutError:
+        return False, "timeout"
+    except OSError as e:
+        # e.g. No route to host, network unreachable, etc.
+        if getattr(e, "errno", None) in (101, 113):
+            return False, "unreachable"
+        return False, "error"
 
 
 class CameraListContainer(QWidget):
@@ -802,6 +840,7 @@ class CameraThread(QThread):
         self.video_writer = None
         self.cap = None
         self.reconnect_delay = 3  # Sekunden zwischen Reconnects
+        self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
         
     def run(self):
         """Hauptschleife mit automatischem Retry"""
@@ -819,6 +858,33 @@ class CameraThread(QThread):
     
     def _connect_and_stream(self):
         """Verbindung herstellen und streamen"""
+        # Best-effort wake attempt for sleeping/battery cameras
+        if self._host:
+            for http_port in (80, 8000):
+                if not self.running:
+                    break
+                try:
+                    url = f"http://{self._host}:{http_port}/api.cgi?cmd=GetDevInfo"
+                    if self._user is not None:
+                        requests.get(
+                            url,
+                            auth=HTTPDigestAuth(self._user, self._password or ""),
+                            timeout=1,
+                        )
+                    else:
+                        requests.get(url, timeout=1)
+                except Exception:
+                    pass
+
+        # Fast RTSP port reachability check to avoid long OpenCV hangs
+        if self._host:
+            ok, reason = _tcp_probe(self._host, int(self._port or 554), timeout=0.7)
+            if not ok:
+                if reason in ("timeout", "unreachable"):
+                    raise Exception(tr("camera.status.sleep"))
+                if reason == "refused":
+                    raise Exception(tr("camera.error.stream_unreachable"))
+
         # RTSP Stream öffnen mit optimierten Parametern
         self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         
