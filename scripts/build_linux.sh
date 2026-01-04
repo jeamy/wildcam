@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 APP_NAME="${APP_NAME:-wildcam}"
 ENTRY_POINT="${ENTRY_POINT:-main.py}"
 
@@ -16,6 +16,23 @@ fi
 VENV_DIR="$REPO_ROOT/.venv"
 DIST_DIR="$REPO_ROOT/dist"
 BUILD_DIR="$REPO_ROOT/build"
+
+if [[ -d "$VENV_DIR" ]]; then
+  VENV_PY="$VENV_DIR/bin/python"
+  if [[ -x "$VENV_PY" ]]; then
+    VENV_VERSION="$($VENV_PY -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    REQUESTED_VERSION="$($PYTHON_BIN -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
+    if [[ "$VENV_VERSION" != "$REQUESTED_VERSION" ]]; then
+      if [[ "${RECREATE_VENV:-0}" == "1" ]]; then
+        rm -rf "$VENV_DIR"
+      else
+        echo "Existing venv uses Python $VENV_VERSION but requested is $REQUESTED_VERSION." >&2
+        echo "Delete $VENV_DIR or re-run with RECREATE_VENV=1" >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
 
 if [[ ! -d "$VENV_DIR" ]]; then
   "$PYTHON_BIN" -m venv "$VENV_DIR"
