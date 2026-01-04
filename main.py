@@ -906,6 +906,8 @@ class CameraWidget(QWidget):
         self.stream_active = False
         self.last_frame = None
         self._drag_start_pos = None
+        self._video_drag_start_pos = None
+        self._video_dragging = False
         
         layout = QVBoxLayout()
         layout.setContentsMargins(2, 2, 2, 2)
@@ -918,7 +920,9 @@ class CameraWidget(QWidget):
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
         self.video_label.setScaledContents(False)
-        self.video_label.mousePressEvent = self._on_video_clicked
+        self.video_label.mousePressEvent = self._on_video_mouse_press
+        self.video_label.mouseMoveEvent = self._on_video_mouse_move
+        self.video_label.mouseReleaseEvent = self._on_video_mouse_release
         
         # Info Label mit FPS
         self.info_label = QLabel(f"{self.camera_name} - {tr('camera.status.offline')}")
@@ -1014,6 +1018,38 @@ class CameraWidget(QWidget):
     
     def _on_video_clicked(self, event):
         self.clicked.emit(self.camera_id)
+
+    def _on_video_mouse_press(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._video_drag_start_pos = event.pos()
+            self._video_dragging = False
+
+    def _on_video_mouse_move(self, event):
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+
+        if self._video_drag_start_pos is None:
+            return
+
+        if (event.pos() - self._video_drag_start_pos).manhattanLength() < 8:
+            return
+
+        if self._video_dragging:
+            return
+
+        self._video_dragging = True
+        mime = QMimeData()
+        mime.setData("application/x-wildcam-camera-id", str(self.camera_id).encode("utf-8"))
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+    def _on_video_mouse_release(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            if not self._video_dragging:
+                self._on_video_clicked(event)
+            self._video_drag_start_pos = None
+            self._video_dragging = False
 
     def update_frame(self, frame):
         """Frame aktualisieren mit FPS-Berechnung"""
