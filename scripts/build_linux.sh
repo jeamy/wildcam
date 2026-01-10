@@ -57,6 +57,7 @@ rm -rf "$DIST_DIR" "$BUILD_DIR"
   --onefile \
   --windowed \
   --name "$APP_NAME" \
+  --add-data "assets/icons:assets/icons" \
   "$ENTRY_POINT"
 
 EXE_PATH="$DIST_DIR/$APP_NAME"

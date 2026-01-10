@@ -8,8 +8,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QProgressBar, QDialog, QDialogButtonBox, QTableWidget,
                              QTableWidgetItem, QHeaderView, QSizePolicy, QSplitter,
                              QTabWidget)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData
-from PyQt6.QtGui import QImage, QPixmap, QDrag
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize
+from PyQt6.QtGui import QImage, QPixmap, QDrag, QIcon
 from datetime import datetime
 import json
 import os
@@ -19,6 +19,8 @@ from requests.auth import HTTPDigestAuth
 import ipaddress
 import threading
 from urllib.parse import urlparse
+import struct
+import time
 
 try:
     import sip  # type: ignore
@@ -27,6 +29,18 @@ except Exception:  # pragma: no cover
 
 
 CURRENT_LANG = "de"
+
+
+def resource_path(relative_path: str) -> str:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        base_path = sys._MEIPASS  # type: ignore[attr-defined]
+    else:
+        base_path = os.path.abspath(os.path.dirname(__file__))
+    return os.path.join(base_path, relative_path)
+
+
+def load_svg_icon(name: str) -> QIcon:
+    return QIcon(resource_path(os.path.join("assets", "icons", name)))
 
 
 TRANSLATIONS = {
@@ -39,14 +53,14 @@ TRANSLATIONS = {
         "label.name": "Name:",
         "placeholder.rtsp_url": "rtsp://admin:password@192.168.1.100:554/h264Preview_01_main",
         "placeholder.name.short": "z.B. Eingang",
-        "btn.add": "➕ Hinzufügen",
-        "btn.discover": "🔍 Auto-Suche",
+        "btn.add": "Hinzufügen",
+        "btn.discover": "Auto-Suche",
         "btn.clear_all": "Alle entfernen",
-        "btn.path": "📁 Speicherort",
-        "btn.start_all": "▶ Alle Streams starten",
-        "btn.stop_all": "⏹ Alle Streams stoppen",
-        "btn.record_all": "● Alle aufnehmen",
-        "btn.record_all_stop": "■ Alle stoppen",
+        "btn.path": "Speicherort",
+        "btn.start_all": "Alle Streams starten",
+        "btn.stop_all": "Alle Streams stoppen",
+        "btn.record_all": "Alle aufnehmen",
+        "btn.record_all_stop": "Alle stoppen",
         "label.camera_count": "Kameras: {total} | Aktiv: {active}",
         "big.select_camera": "Kamera auswählen…",
         "status.ready": "Bereit - CPU-optimiert für parallele Streams",
@@ -124,9 +138,12 @@ TRANSLATIONS = {
         "dialog.discovery.col.model": "Modell",
         "dialog.discovery.col.manufacturer": "Hersteller",
         "dialog.discovery.col.ports": "Ports",
+        "dialog.discovery.col.uid": "UID",
         "dialog.discovery.err_network": "Bitte Netzwerk-Bereich eingeben!",
         "dialog.discovery.scan_cancelled": "Scan abgebrochen - {count} Kameras gefunden",
         "dialog.discovery.scan_done": "Scan abgeschlossen - {count} Kameras gefunden",
+        "label.uid": "UID (optional):",
+        "placeholder.uid": "z.B. 9527000000000000",
         "scan.checking": "Prüfe {ip}...",
         "scan.error": "Fehler: {error}",
         "error.prefix": "Fehler: {error}",
@@ -228,9 +245,12 @@ TRANSLATIONS = {
         "dialog.discovery.col.model": "Model",
         "dialog.discovery.col.manufacturer": "Vendor",
         "dialog.discovery.col.ports": "Ports",
+        "dialog.discovery.col.uid": "UID",
         "dialog.discovery.err_network": "Please enter a network range!",
         "dialog.discovery.scan_cancelled": "Scan cancelled - {count} cameras found",
         "dialog.discovery.scan_done": "Scan finished - {count} cameras found",
+        "label.uid": "UID (optional):", # Added by instruction
+        "placeholder.uid": "e.g. 9527000000000000", # Added by instruction
         "scan.checking": "Checking {ip}...",
         "scan.error": "Error: {error}",
         "error.prefix": "Error: {error}",
@@ -289,6 +309,166 @@ def _tcp_probe(host: str, port: int, timeout: float = 0.7) -> tuple[bool, str]:
         if getattr(e, "errno", None) in (101, 113):
             return False, "unreachable"
         return False, "error"
+
+
+def _ws_discovery(timeout: float = 2.0) -> list[str]:
+    """ONVIF/WS-Discovery (UDP 3702)."""
+    msg = (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<Envelope xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns="http://www.w3.org/2003/05/soap-envelope">'
+        '<Header><MessageID xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">uuid:8253()</MessageID>'
+        '<To xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">urn:schemas-xmlsoap-org:ws:2004:08:discovery</To>'
+        '<Action xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/discovery/Probe</Action></Header>'
+        '<Body><Probe xmlns="http://schemas.xmlsoap.org/ws/2004/08/discovery"><Types>tds:Device</Types></Probe></Body></Envelope>'
+    )
+    ips = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.settimeout(timeout)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.sendto(msg.encode(), ("239.255.255.250", 3702))
+        
+        while True:
+            try:
+                data, addr = sock.recvfrom(4096)
+                ips.add(addr[0])
+            except socket.timeout:
+                break
+        sock.close()
+    except: pass
+    return list(ips)
+
+
+def _ssdp_discovery(timeout: float = 2.0) -> list[str]:
+    """UPnP/SSDP Discovery (UDP 1900)."""
+    msg = (
+        'M-SEARCH * HTTP/1.1\r\n'
+        'HOST: 239.255.255.250:1900\r\n'
+        'MAN: "ssdp:discover"\r\n'
+        'MX: 2\r\n'
+        'ST: ssdp:all\r\n'
+        '\r\n'
+    )
+    ips = set()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.settimeout(timeout)
+        sock.sendto(msg.encode(), ("239.255.255.250", 1900))
+        
+        while True:
+            try:
+                data, addr = sock.recvfrom(4096)
+                ips.add(addr[0])
+            except socket.timeout:
+                break
+        sock.close()
+    except: pass
+    return list(ips)
+
+
+def _udp_reolink_probe(ip: str, timeout: float = 2.0) -> list | dict | None:
+    """Sendet ein Reolink UDP Discovery Paket an eine spezifische oder Broadcast IP."""
+    ports = [9000, 10000, 2000]
+    
+    # Discovery JSON Payloads (GetDevInfo und Search)
+    payloads = [
+        [{"cmd": "GetDevInfo", "action": 0, "param": {}}],
+        {"cmd": "GetDevInfo", "action": 0, "param": {}},
+        [{"cmd": "Search", "action": 0, "param": {}}],
+        {"cmd": "Search", "action": 0, "param": {}}
+    ]
+    
+    results = []
+    
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.settimeout(timeout)
+    if ip == "255.255.255.255":
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+
+    for port in ports:
+        for cmd_data in payloads:
+            data = json.dumps(cmd_data).encode('utf-8')
+            for endian in ['<', '>']:
+                header = struct.pack(endian + "2sHHHII", b"BC", 0, 1, 0, len(data), 0)
+                payload = header + data
+                try:
+                    # Weck-Schuss
+                    sock.sendto(b"\x00" * 32, (ip, port))
+                    sock.sendto(payload, (ip, port))
+                    
+                    while True:
+                        try:
+                            resp_data, addr = sock.recvfrom(4096)
+                        except socket.timeout:
+                            break
+                            
+                        if len(resp_data) >= 16:
+                            idx = -1
+                            for i in range(len(resp_data) - 1):
+                                if resp_data[i:i+2].lower() == b"bc":
+                                    for j in range(i+2, min(i+48, len(resp_data))):
+                                        if resp_data[j] in (ord('['), ord('{')):
+                                            idx = j
+                                            break
+                                    if idx != -1: break
+                            
+                            if idx != -1:
+                                content = resp_data[idx:].decode('utf-8', 'ignore')
+                                if content.startswith('['): end = content.rfind(']')
+                                else: end = content.rfind('}')
+                                
+                                if end != -1:
+                                    try:
+                                        res = json.loads(content[:end+1])
+                                        info = None
+                                        # Wir suchen nach DevInfo oder Search-Response
+                                        val = res[0].get('value', {}) if isinstance(res, list) else res.get('value', {})
+                                        info = val.get('DevInfo') or val.get('SearchResult') or val
+                                        
+                                        if info and (info.get('name') or info.get('serial') or info.get('mac')):
+                                            info['remote_ip'] = addr[0]
+                                            if ip != "255.255.255.255":
+                                                sock.close()
+                                                return info
+                                            if info.get('remote_ip') not in [r.get('remote_ip') for r in results]:
+                                                results.append(info)
+                                    except: pass
+                        if ip != "255.255.255.255": break
+                except: break
+            if ip != "255.255.255.255" and results: break
+    
+    sock.close()
+    return results if ip == "255.255.255.255" else (results[0] if results else None)
+
+
+def _udp_reolink_wake(ip: str, uid: str = ""):
+    """Sendet einen intensiven Weck-Burst an eine Reolink Kamera."""
+    if not ip: return
+    try:
+        # Falls UID vorhanden, bauen wir ein echtes Abfrage-Paket
+        payload = b""
+        if uid:
+            msg = [{"cmd": "GetDevInfo", "action": 0, "param": {}}]
+            data = json.dumps(msg).encode('utf-8')
+            header = struct.pack("<2sHHHII", b"BC", 0, 1, 0, len(data), 0)
+            payload = header + data
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Wir pingen alle relevanten Ports mehrfach
+        for port in [9000, 10000, 8000]:
+            for _ in range(5):
+                # Null-Bytes zum "Aufwecken" des WLAN/PIR
+                sock.sendto(b"\x00" * 64, (ip, port))
+                if payload:
+                    # Gezielte Abfrage mit UID (Baichuan)
+                    sock.sendto(payload, (ip, port))
+                else:
+                    # Generischer Header
+                    h = struct.pack("<2sHHHII", b"BC", 0, 1, 0, 0, 0)
+                    sock.sendto(h, (ip, port))
+                time.sleep(0.02)
+        sock.close()
+    except: pass
 
 
 class CameraListContainer(QWidget):
@@ -364,7 +544,7 @@ class CameraListContainer(QWidget):
 
 class CameraDiscoveryThread(QThread):
     """Thread für automatische Kamera-Suche im Netzwerk"""
-    camera_found = pyqtSignal(dict)  # {ip, name, model, ports}
+    camera_found = pyqtSignal(dict)  # {ip, name, model, ports, uid}
     progress_update = pyqtSignal(int, str)
     scan_complete = pyqtSignal(int)
     
@@ -383,6 +563,45 @@ class CameraDiscoveryThread(QThread):
         self.found_cameras = []
         
         try:
+            # 1. Multi-Discovery (UDP Broadcasts)
+            self.progress_update.emit(5, "Starte Netzwerk-Suche (UDP/WS/SSDP)...")
+            
+            discovery_ips = set()
+            
+            # Reolink BC Discovery
+            broadcast_results = _udp_reolink_probe("255.255.255.255", timeout=1.5)
+            if broadcast_results and isinstance(broadcast_results, list):
+                for info in broadcast_results:
+                    discovery_ips.add(info['remote_ip'])
+                    camera_info = {
+                        'ip': info.get('remote_ip', ''),
+                        'ports': [554, 8000, 9000],
+                        'name': info.get('name', 'Reolink Camera'),
+                        'model': info.get('model', 'Unknown'),
+                        'manufacturer': "Reolink",
+                        'uid': info.get('devNo', '') or info.get('serial', '')
+                    }
+                    if camera_info['ip'] not in [c['ip'] for c in self.found_cameras]:
+                        self.found_cameras.append(camera_info)
+                        self.camera_found.emit(camera_info)
+
+            # ONVIF Discovery
+            onvif_ips = _ws_discovery(timeout=1.0)
+            discovery_ips.update(onvif_ips)
+            
+            # SSDP Discovery
+            ssdp_ips = _ssdp_discovery(timeout=1.0)
+            discovery_ips.update(ssdp_ips)
+
+            # Wenn wir Kameras über Broadcast gefunden haben, prüfen wir diese zuerst
+            for dip in discovery_ips:
+                if dip not in [c['ip'] for c in self.found_cameras]:
+                    # Hole Details für diese IP
+                    c_info = self._get_camera_info(dip, [80, 8000, 554, 9000])
+                    if c_info:
+                        self.found_cameras.append(c_info)
+                        self.camera_found.emit(c_info)
+
             network = ipaddress.ip_network(self.network_range, strict=False)
             total_hosts = network.num_addresses - 2  # Ohne Netzwerk- und Broadcast-Adresse
             checked = 0
@@ -439,9 +658,19 @@ class CameraDiscoveryThread(QThread):
             'name': tr("camera.default_name.ip", ip=ip),
             'model': tr("camera.meta.unknown"),
             'manufacturer': tr("camera.meta.unknown"),
+            'uid': '',
         }
         
-        # Versuche ONVIF/HTTP Zugriff
+        # 1. Versuche UDP Reolink Probe (Port 9000) - am besten für UID & Standby
+        udp_info = _udp_reolink_probe(ip)
+        if udp_info:
+            camera_info['name'] = udp_info.get('name', camera_info['name'])
+            camera_info['model'] = udp_info.get('model', camera_info['model'])
+            camera_info['manufacturer'] = "Reolink"
+            camera_info['uid'] = udp_info.get('devNo', '') or udp_info.get('serial', '')
+            return camera_info
+
+        # 2. Versuche ONVIF/HTTP Zugriff
         if 80 in ports or 8000 in ports:
             for port in [80, 8000]:
                 if port in ports:
@@ -461,6 +690,7 @@ class CameraDiscoveryThread(QThread):
                                 camera_info['name'] = info.get('name', camera_info['name'])
                                 camera_info['model'] = info.get('model', camera_info['model'])
                                 camera_info['manufacturer'] = "Reolink"
+                                camera_info['uid'] = info.get('devNo', '') or info.get('serial', '')
                                 return camera_info
                     except:
                         pass
@@ -508,6 +738,15 @@ class CameraEditDialog(QDialog):
         self.url_input.setPlaceholderText(tr("dialog.edit.rtsp_ph"))
         url_layout.addWidget(self.url_input)
         layout.addLayout(url_layout)
+        
+        # UID
+        uid_layout = QHBoxLayout()
+        uid_layout.addWidget(QLabel(tr("label.uid")))
+        self.uid_input = QLineEdit()
+        self.uid_input.setText(self.camera_data.get('uid', ''))
+        self.uid_input.setPlaceholderText(tr("placeholder.uid"))
+        uid_layout.addWidget(self.uid_input)
+        layout.addLayout(uid_layout)
         
         # Hilfe-Text
         help_group = QGroupBox(tr("dialog.edit.help_group"))
@@ -624,6 +863,7 @@ class CameraEditDialog(QDialog):
         """Geänderte Daten zurückgeben"""
         self.camera_data['name'] = self.name_input.text().strip()
         self.camera_data['url'] = self.url_input.text().strip()
+        self.camera_data['uid'] = self.uid_input.text().strip()
         return self.camera_data
 
 
@@ -699,7 +939,7 @@ class CameraDiscoveryDialog(QDialog):
         found_layout = QVBoxLayout()
         
         self.camera_table = QTableWidget()
-        self.camera_table.setColumnCount(6)
+        self.camera_table.setColumnCount(7)
         self.camera_table.setHorizontalHeaderLabels([
             tr("dialog.discovery.col.select"),
             tr("dialog.discovery.col.ip"),
@@ -707,6 +947,7 @@ class CameraDiscoveryDialog(QDialog):
             tr("dialog.discovery.col.model"),
             tr("dialog.discovery.col.manufacturer"),
             tr("dialog.discovery.col.ports"),
+            tr("dialog.discovery.col.uid"),
         ])
         self.camera_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.camera_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -798,6 +1039,7 @@ class CameraDiscoveryDialog(QDialog):
         self.camera_table.setItem(row, 3, QTableWidgetItem(camera_info['model']))
         self.camera_table.setItem(row, 4, QTableWidgetItem(camera_info['manufacturer']))
         self.camera_table.setItem(row, 5, QTableWidgetItem(', '.join(map(str, camera_info['ports']))))
+        self.camera_table.setItem(row, 6, QTableWidgetItem(camera_info.get('uid', '')))
     
     def on_progress_update(self, progress, message):
         """Progress aktualisieren"""
@@ -831,17 +1073,28 @@ class CameraThread(QThread):
     frame_ready = pyqtSignal(np.ndarray, int)
     connection_status = pyqtSignal(bool, int, str)
     
-    def __init__(self, camera_id, rtsp_url):
+    def __init__(self, camera_id, rtsp_url, uid=""):
         super().__init__()
         self.camera_id = camera_id
+        # Versuche URLs zu normalisieren (Reolink ist oft empfindlich bei h264 vs h265)
         self.rtsp_url = rtsp_url
+        self.uid = uid
         self.running = False
         self.recording = False
         self.video_writer = None
         self._writer_lock = threading.Lock()
         self.cap = None
-        self.reconnect_delay = 3  # Sekunden zwischen Reconnects
+        self.reconnect_delay = 5  # Mehr Zeit für Akku-Kameras
         self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
+        
+        # Alternative Pfade (Reolink Fallbacks)
+        self._alt_paths = [
+            "h264Preview_01_main",
+            "h265Preview_01_main",
+            "Preview_01_main",
+            "h264Preview_01_sub",
+            "Preview_01_sub"
+        ]
         
     def run(self):
         """Hauptschleife mit automatischem Retry"""
@@ -861,40 +1114,68 @@ class CameraThread(QThread):
         """Verbindung herstellen und streamen"""
         # Best-effort wake attempt for sleeping/battery cameras
         if self._host:
-            for http_port in (80, 8000):
-                if not self.running:
-                    break
-                try:
-                    url = f"http://{self._host}:{http_port}/api.cgi?cmd=GetDevInfo"
-                    if self._user is not None:
-                        requests.get(
-                            url,
-                            auth=HTTPDigestAuth(self._user, self._password or ""),
-                            timeout=1,
-                        )
-                    else:
-                        requests.get(url, timeout=1)
-                except Exception:
-                    pass
+            # Intensiv-Weckphase (für Akku-Kameras wie Argus PT Ultra)
+            # Wir wiederholen das Wecken und prüfen die Erreichbarkeit über mind. 10 Sek.
+            self.connection_status.emit(False, self.camera_id, tr("camera.preview.waiting"))
+            
+            wake_ok = False
+            for attempt in range(10): # 10 Versuche alle ~1s = ca. 10s total
+                if not self.running: break
+                
+                # 1. UDP Wake Burst
+                _udp_reolink_wake(self._host, self.uid)
+                
+                # 2. Optionaler HTTP Ping
+                try: requests.get(f"http://{self._host}:8000/api.cgi?cmd=GetDevInfo", timeout=0.2)
+                except: pass
+                
+                # 3. RTSP Erreichbarkeit prüfen (Port 554)
+                for _ in range(3):
+                    if not self.running: break
+                    ok, _ = _tcp_probe(self._host, int(self._port or 554), timeout=0.2)
+                    if ok:
+                        wake_ok = True
+                        break
+                    time.sleep(0.3)
+                
+                if wake_ok: break
+            
+            if wake_ok:
+                self.connection_status.emit(True, self.camera_id, tr("camera.status.connected")) # Wach!
+                time.sleep(1.0)
+            else:
+                # Auch wenn TCP Probe fehlschlägt, versuchen wir es trotzdem 
+                # (manchen Kameras antworten nicht auf Port-Checks, aber auf echte RTSP-Anfragen)
+                self.connection_status.emit(False, self.camera_id, tr("camera.status.connecting"))
 
-        # Fast RTSP port reachability check to avoid long OpenCV hangs
-        if self._host:
-            ok, reason = _tcp_probe(self._host, int(self._port or 554), timeout=0.7)
-            if not ok:
-                if reason in ("timeout", "unreachable"):
-                    raise Exception(tr("camera.status.sleep"))
-                if reason == "refused":
-                    raise Exception(tr("camera.error.stream_unreachable"))
-
-        # RTSP Stream öffnen mit optimierten Parametern
+        # RTSP Stream öffnen (mit Fallback-Pfaden für Reolink)
+        # Wir versuchen zuerst den konfigurierten URL
         self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
         
-        # Optimierungen für geringe Latenz und CPU-Schonung
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimaler Buffer
-        self.cap.set(cv2.CAP_PROP_FPS, 25)  # FPS begrenzen
+        # Falls die Kamera nicht öffnet, probieren wir Reolink-typische Varianten (H.264/H.265/Sub)
+        if not self.cap.isOpened():
+            base_url = self.rtsp_url.rsplit('/', 1)[0] if '/' in self.rtsp_url else self.rtsp_url
+            for path in self._alt_paths:
+                test_url = f"{base_url}/{path}"
+                if test_url == self.rtsp_url: continue
+                
+                self.connection_status.emit(False, self.camera_id, f"Prüfe Pfad: {path}...")
+                self.cap = cv2.VideoCapture(test_url, cv2.CAP_FFMPEG)
+                if self.cap.isOpened():
+                    self.rtsp_url = test_url
+                    break
         
         if not self.cap.isOpened():
+            # Diagnostik: Wenn RTSP zu ist, aber Port 8000 offen, ist RTSP wahrscheinlich in der Kamera deaktiviert
+            if self._host:
+                ok_api, _ = _tcp_probe(self._host, 8000, timeout=0.5)
+                if ok_api:
+                    raise Exception("Kamera antwortet auf API (Port 8000), aber RTSP ist blockiert. Bitte 'RTSP' in den Kamera-Einstellungen (Netzwerk -> Fortgeschritten -> Servereinstellungen) aktivieren!")
             raise Exception(tr("camera.error.stream_unreachable"))
+        
+        # Optimierungen für geringe Latenz
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_FPS, 25)
         
         self.connection_status.emit(True, self.camera_id, tr("camera.status.connected"))
         
@@ -1039,40 +1320,52 @@ class CameraWidget(QWidget):
         btn_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout.setSpacing(4)
         
+        icon_size = QSize(18, 18)
+
         # Aufnahme Button
-        self.record_btn = QPushButton("●")
+        self.record_btn = QPushButton()
         self.record_btn.setCheckable(True)
         self.record_btn.setEnabled(False)
         self.record_btn.setMaximumWidth(40)
         self.record_btn.setFixedHeight(24)
+        self.record_btn.setIcon(load_svg_icon("record.svg"))
+        self.record_btn.setIconSize(icon_size)
         self.record_btn.setToolTip(tr("camera.tooltip.record"))
         self.record_btn.clicked.connect(self.toggle_recording)
 
-        self.stream_btn = QPushButton("▶")
+        self.stream_btn = QPushButton()
         self.stream_btn.setCheckable(True)
         self.stream_btn.setMaximumWidth(40)
         self.stream_btn.setFixedHeight(24)
+        self.stream_btn.setIcon(load_svg_icon("play.svg"))
+        self.stream_btn.setIconSize(icon_size)
         self.stream_btn.setToolTip(tr("camera.tooltip.stream"))
         self.stream_btn.clicked.connect(self.toggle_stream)
 
-        self.snapshot_btn = QPushButton("📷")
+        self.snapshot_btn = QPushButton()
         self.snapshot_btn.setMaximumWidth(40)
         self.snapshot_btn.setFixedHeight(24)
+        self.snapshot_btn.setIcon(load_svg_icon("camera.svg"))
+        self.snapshot_btn.setIconSize(icon_size)
         self.snapshot_btn.setToolTip(tr("camera.tooltip.snapshot"))
         self.snapshot_btn.clicked.connect(self._request_snapshot)
         
         # Edit Button
-        self.edit_btn = QPushButton("✎")
+        self.edit_btn = QPushButton()
         self.edit_btn.setMaximumWidth(40)
         self.edit_btn.setFixedHeight(24)
         self.edit_btn.setToolTip(tr("camera.tooltip.edit"))
+        self.edit_btn.setIcon(load_svg_icon("pencil.svg"))
+        self.edit_btn.setIconSize(icon_size)
         self.edit_btn.setStyleSheet("color: #64b5f6;")
         
         # Entfernen Button
-        self.remove_btn = QPushButton("✕")
+        self.remove_btn = QPushButton()
         self.remove_btn.setMaximumWidth(40)
         self.remove_btn.setFixedHeight(24)
         self.remove_btn.setToolTip(tr("camera.tooltip.remove"))
+        self.remove_btn.setIcon(load_svg_icon("trash.svg"))
+        self.remove_btn.setIconSize(icon_size)
         self.remove_btn.setStyleSheet("color: #999;")
         
         btn_layout.addWidget(self.stream_btn)
@@ -1214,16 +1507,16 @@ class CameraWidget(QWidget):
     def toggle_stream(self):
         self.stream_active = self.stream_btn.isChecked()
         if self.stream_active:
-            self.stream_btn.setText("⏹")
+            self.stream_btn.setIcon(load_svg_icon("stop.svg"))
         else:
-            self.stream_btn.setText("▶")
+            self.stream_btn.setIcon(load_svg_icon("play.svg"))
         self.stream_toggled.emit(self.camera_id, self.stream_active)
 
     def set_stream_active(self, active):
         self.stream_active = active
         self.stream_btn.blockSignals(True)
         self.stream_btn.setChecked(active)
-        self.stream_btn.setText("⏹" if active else "▶")
+        self.stream_btn.setIcon(load_svg_icon("stop.svg") if active else load_svg_icon("play.svg"))
         self.stream_btn.blockSignals(False)
         if not active:
             self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
@@ -1316,14 +1609,25 @@ class MainWindow(QMainWindow):
         self.name_input.setMaximumWidth(150)
         row1.addWidget(self.name_input)
         
+        self.uid_label = QLabel(tr("label.uid"))
+        row1.addWidget(self.uid_label)
+        self.uid_input = QLineEdit()
+        self.uid_input.setPlaceholderText(tr("placeholder.uid"))
+        self.uid_input.setMaximumWidth(150)
+        row1.addWidget(self.uid_input)
+        
         self.add_btn = QPushButton(tr("btn.add"))
         add_btn = self.add_btn
         add_btn.clicked.connect(self.add_camera)
+        add_btn.setIcon(load_svg_icon("plus.svg"))
+        add_btn.setIconSize(QSize(18, 18))
         row1.addWidget(add_btn)
         
         self.discover_btn = QPushButton(tr("btn.discover"))
         discover_btn = self.discover_btn
         discover_btn.clicked.connect(self.show_discovery_dialog)
+        discover_btn.setIcon(load_svg_icon("search.svg"))
+        discover_btn.setIconSize(QSize(18, 18))
         discover_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold;")
         row1.addWidget(discover_btn)
         
@@ -1347,6 +1651,8 @@ class MainWindow(QMainWindow):
         self.path_btn = QPushButton(tr("btn.path"))
         path_btn = self.path_btn
         path_btn.clicked.connect(self.select_recording_path)
+        path_btn.setIcon(load_svg_icon("folder.svg"))
+        path_btn.setIconSize(QSize(18, 18))
         row2.addWidget(path_btn)
 
         self.language_label = QLabel(tr("label.language"))
@@ -1376,16 +1682,22 @@ class MainWindow(QMainWindow):
         
         self.start_all_btn = QPushButton(tr("btn.start_all"))
         self.start_all_btn.clicked.connect(self.start_all_streams)
+        self.start_all_btn.setIcon(load_svg_icon("play.svg"))
+        self.start_all_btn.setIconSize(QSize(18, 18))
         self.start_all_btn.setStyleSheet("font-weight: bold; padding: 4px 10px;")
         self.start_all_btn.setFixedHeight(28)
         
         self.stop_all_btn = QPushButton(tr("btn.stop_all"))
         self.stop_all_btn.clicked.connect(self.stop_all_streams)
+        self.stop_all_btn.setIcon(load_svg_icon("stop.svg"))
+        self.stop_all_btn.setIconSize(QSize(18, 18))
         self.stop_all_btn.setFixedHeight(28)
         
         self.record_all_btn = QPushButton(tr("btn.record_all"))
         self.record_all_btn.setCheckable(True)
         self.record_all_btn.clicked.connect(self.toggle_all_recording)
+        self.record_all_btn.setIcon(load_svg_icon("record.svg"))
+        self.record_all_btn.setIconSize(QSize(18, 18))
         self.record_all_btn.setFixedHeight(28)
         
         self.camera_count_label = QLabel(tr("label.camera_count", total=0, active=0))
@@ -1519,7 +1831,8 @@ class MainWindow(QMainWindow):
                 self.cameras.append({
                     'id': camera_id,
                     'url': rtsp_url,
-                    'name': name
+                    'name': name,
+                    'uid': camera_info.get('uid', '')
                 })
                 
                 # Widget erstellen
@@ -1543,6 +1856,7 @@ class MainWindow(QMainWindow):
         """Kamera hinzufügen"""
         url = self.url_input.text().strip()
         name = self.name_input.text().strip()
+        uid = self.uid_input.text().strip()
         
         if not url:
             QMessageBox.warning(self, tr("dialog.title.error"), tr("label.rtsp_url"))
@@ -1557,7 +1871,8 @@ class MainWindow(QMainWindow):
         self.cameras.append({
             'id': camera_id, 
             'url': url, 
-            'name': camera_name
+            'name': camera_name,
+            'uid': uid
         })
         
         # Widget erstellen
@@ -1575,6 +1890,7 @@ class MainWindow(QMainWindow):
         # Eingabe leeren
         self.url_input.clear()
         self.name_input.clear()
+        self.uid_input.clear()
         
         self.update_status_display()
         self.statusBar().showMessage(tr("status.camera_added", name=camera_name))
@@ -1650,7 +1966,7 @@ class MainWindow(QMainWindow):
             self.camera_widgets[camera_id].toggle_recording()
         
         # Neuen Thread erstellen
-        thread = CameraThread(camera_id, camera['url'])
+        thread = CameraThread(camera_id, camera['url'], camera.get('uid', ''))
         
         # Signals verbinden
         thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
@@ -1811,7 +2127,7 @@ class MainWindow(QMainWindow):
                 continue
             
             # Neuen Thread erstellen
-            thread = CameraThread(camera_id, camera['url'])
+            thread = CameraThread(camera_id, camera['url'], camera.get('uid', ''))
             
             # Signals verbinden
             thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
@@ -1902,10 +2218,14 @@ class MainWindow(QMainWindow):
         
         if recording:
             self.record_all_btn.setText(tr("btn.record_all_stop"))
+            self.record_all_btn.setIcon(load_svg_icon("stop.svg"))
+            self.record_all_btn.setIconSize(QSize(18, 18))
             self.record_all_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
             self.statusBar().showMessage(tr("status.recordings_started", count=count))
         else:
             self.record_all_btn.setText(tr("btn.record_all"))
+            self.record_all_btn.setIcon(load_svg_icon("record.svg"))
+            self.record_all_btn.setIconSize(QSize(18, 18))
             self.record_all_btn.setStyleSheet("")
             self.statusBar().showMessage(tr("status.recordings_stopped", count=count))
     
@@ -2017,6 +2337,10 @@ class MainWindow(QMainWindow):
                         fixed_config = True
                         continue
                     seen_urls.add(url)
+                    # UID explizit sicherstellen (falls vorhanden)
+                    if 'uid' not in c:
+                        c['uid'] = ''
+                        fixed_config = True # Sorgen wir dafür, dass es gespeichert wird
                     deduped_by_url.append(c)
 
                 self.cameras = deduped_by_url
@@ -2061,6 +2385,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Beim Schließen alle Threads sauber beenden"""
         self._closing = True
+        self.save_config()
         self.stop_all_streams()
         event.accept()
 
