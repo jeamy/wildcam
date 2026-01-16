@@ -15,8 +15,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QMessageBox, QComboBox, QGroupBox, QScrollArea,
                              QProgressBar, QDialog, QDialogButtonBox, QTableWidget,
                              QTableWidgetItem, QHeaderView, QSizePolicy, QSplitter,
-                             QTabWidget)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize
+                             QTabWidget, QStyle)
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize, QEvent
 from PyQt6.QtGui import QImage, QPixmap, QDrag, QIcon
 from datetime import datetime
 import json
@@ -1809,6 +1809,14 @@ class CameraWidget(QWidget):
             self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
 
 
+class PreviewLabel(QLabel):
+    def sizeHint(self):
+        return QSize(0, 0)
+
+    def minimumSizeHint(self):
+        return QSize(0, 0)
+
+
 class MainWindow(QMainWindow):
     """Hauptfenster der Anwendung"""
     def __init__(self):
@@ -2006,7 +2014,7 @@ class MainWindow(QMainWindow):
         self.big_preview_container = QWidget()
         self.big_preview_layout = QVBoxLayout(self.big_preview_container)
         self.big_preview_layout.setContentsMargins(10, 0, 0, 0)
-        self.big_preview_label = QLabel()
+        self.big_preview_label = PreviewLabel()
         self.big_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.big_preview_label.setText(tr("big.select_camera"))
         self.big_preview_label.setStyleSheet("border: 2px solid #555; background-color: black;")
@@ -2907,12 +2915,14 @@ class MainWindow(QMainWindow):
                 self._clear_layout(item.layout())
         
         self.multi_view_labels.clear()
+        if hasattr(self, 'multi_view_close_buttons'):
+            self.multi_view_close_buttons.clear()
         
         num_selected = len(self.selected_camera_ids)
         
         if num_selected == 0:
             # No selection - show default message
-            label = QLabel()
+            label = PreviewLabel()
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setText(tr("big.select_camera"))
             label.setStyleSheet("border: 2px solid #555; background-color: black;")
@@ -2922,7 +2932,7 @@ class MainWindow(QMainWindow):
             self.big_preview_label = label
         elif num_selected == 1:
             # Single camera - full view
-            label = QLabel()
+            label = PreviewLabel()
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setStyleSheet("border: 2px solid #555; background-color: black;")
             label.setMinimumHeight(360)
@@ -2930,6 +2940,31 @@ class MainWindow(QMainWindow):
             self.big_preview_layout.addWidget(label)
             self.big_preview_label = label
             self.multi_view_labels[self.selected_camera_ids[0]] = label
+
+            camera_id = self.selected_camera_ids[0]
+            close_btn = QPushButton()
+            close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+            close_btn.setIconSize(QSize(14, 14))
+            close_btn.setFixedSize(28, 28)
+            close_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: rgba(220, 53, 69, 220);
+                    border: 2px solid white;
+                    border-radius: 14px;
+                }
+                QPushButton:hover {
+                    background-color: rgba(200, 35, 51, 255);
+                    border: 2px solid #ffcccc;
+                }
+            """)
+            close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            close_btn.clicked.connect(lambda checked, cid=camera_id: self._close_multi_view_camera(cid))
+            close_btn.setParent(label)
+            close_btn.raise_()
+            if not hasattr(self, 'multi_view_close_buttons'):
+                self.multi_view_close_buttons = {}
+            self.multi_view_close_buttons[camera_id] = close_btn
+            label.installEventFilter(self)
         else:
             # Multi-camera grid view
             # Calculate grid: 2 cameras = 1 row x 2 cols, 3-4 = 2 rows, 5-6 = 3 rows, etc.
@@ -2940,22 +2975,36 @@ class MainWindow(QMainWindow):
                 row_layout = QHBoxLayout()
                 row_layout.setSpacing(4)
                 
+                # Calculate how many cameras in this row
+                cameras_in_row = min(cols, num_selected - row * cols)
+                
+                # No left spacer - single camera should be on left side
+                
                 for col in range(cols):
                     idx = row * cols + col
                     if idx >= num_selected:
-                        # Add empty spacer for incomplete last row
+                        # Add right spacer to fill remaining space (makes single camera take 1/2 width)
                         spacer = QWidget()
                         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-                        row_layout.addWidget(spacer)
+                        row_layout.addWidget(spacer, 1)
                         continue
                     
                     camera_id = self.selected_camera_ids[idx]
-                    label = QLabel()
+                    
+                    # Container for label + close button
+                    container = QWidget()
+                    container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                    container_layout = QVBoxLayout(container)
+                    container_layout.setContentsMargins(0, 0, 0, 0)
+                    container_layout.setSpacing(0)
+                    
+                    # Label for video
+                    label = PreviewLabel()
                     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     label.setStyleSheet("border: 2px solid #555; background-color: black;")
-                    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
+                    label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                     label.setMinimumHeight(180)
-                    label.setMinimumWidth(100)
+                    label.setMinimumWidth(0)
                     label.setMaximumWidth(16777215)  # Qt max
                     label.setScaledContents(False)
                     
@@ -2963,11 +3012,76 @@ class MainWindow(QMainWindow):
                     if widget:
                         label.setText(f"{widget.camera_name}\n{tr('camera.preview.waiting')}")
                     
-                    row_layout.addWidget(label)
+                    # Close button overlay (top-right)
+                    close_btn = QPushButton()
+                    close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+                    close_btn.setIconSize(QSize(14, 14))
+                    close_btn.setFixedSize(28, 28)
+                    close_btn.setStyleSheet("""
+                        QPushButton {
+                            background-color: rgba(220, 53, 69, 220);
+                            border: 2px solid white;
+                            border-radius: 14px;
+                        }
+                        QPushButton:hover {
+                            background-color: rgba(200, 35, 51, 255);
+                            border: 2px solid #ffcccc;
+                        }
+                    """)
+                    close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                    close_btn.clicked.connect(lambda checked, cid=camera_id: self._close_multi_view_camera(cid))
+                    
+                    # Position close button at top-right - will be repositioned on resize
+                    close_btn.setParent(label)
+                    close_btn.raise_()
+                    
+                    # Store button reference for repositioning
+                    if not hasattr(self, 'multi_view_close_buttons'):
+                        self.multi_view_close_buttons = {}
+                    self.multi_view_close_buttons[camera_id] = close_btn
+                    
+                    # Install event filter to reposition button on resize
+                    label.installEventFilter(self)
+                    
+                    container_layout.addWidget(label)
+                    row_layout.addWidget(container, 1)
                     self.multi_view_labels[camera_id] = label
                 
                 # Set equal stretch for all rows
                 self.big_preview_layout.addLayout(row_layout, 1)
+    
+    def eventFilter(self, obj, event):
+        """Event filter to reposition close buttons on label resize"""
+        if event.type() in (QEvent.Type.Show, QEvent.Type.Resize):
+            # Check if this is a multi-view label
+            for camera_id, label in self.multi_view_labels.items():
+                if obj == label and hasattr(self, 'multi_view_close_buttons'):
+                    close_btn = self.multi_view_close_buttons.get(camera_id)
+                    if close_btn:
+                        # Position button at top-right corner
+                        close_btn.move(label.width() - close_btn.width() - 4, 4)
+                        close_btn.raise_()
+        return super().eventFilter(obj, event)
+    
+    def _close_multi_view_camera(self, camera_id):
+        """Close a camera from multi-view and rebuild grid"""
+        # Remove from selected list
+        if camera_id in self.selected_camera_ids:
+            self.selected_camera_ids.remove(camera_id)
+        
+        # Uncheck the checkbox in the camera widget
+        widget = self.camera_widgets.get(camera_id)
+        if widget and widget.view_checkbox:
+            widget.view_checkbox.blockSignals(True)
+            widget.view_checkbox.setChecked(False)
+            widget.view_checkbox.blockSignals(False)
+        
+        # Clear close button reference
+        if hasattr(self, 'multi_view_close_buttons') and camera_id in self.multi_view_close_buttons:
+            del self.multi_view_close_buttons[camera_id]
+        
+        # Rebuild the multi-view layout
+        self._rebuild_multi_view_layout()
     
     def _clear_layout(self, layout):
         """Recursively clear a layout"""
@@ -2999,8 +3113,10 @@ class MainWindow(QMainWindow):
 
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        self.big_preview_label.setPixmap(QPixmap.fromImage(qt_image))
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(qt_image)
+        pixmap.setDevicePixelRatio(1.0)
+        self.big_preview_label.setPixmap(pixmap)
     
     def _update_multi_view_frame(self, frame, camera_id):
         """Update frame in multi-camera view with aspect ratio preservation"""
@@ -3042,11 +3158,7 @@ class MainWindow(QMainWindow):
         # Create QImage with explicit copy to avoid reference issues
         qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qt_image)
-        
-        # Scale pixmap to exact label size to prevent expansion
-        if pixmap.width() != display_w or pixmap.height() != display_h:
-            pixmap = pixmap.scaled(display_w, display_h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
-        
+        pixmap.setDevicePixelRatio(1.0)
         label.setPixmap(pixmap)
 
 
