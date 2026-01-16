@@ -1,4 +1,12 @@
 import sys
+import os
+
+os.environ['OPENCV_FFMPEG_LOGLEVEL'] = '-8'
+os.environ['OPENCV_LOG_LEVEL'] = 'SILENT'
+os.environ['AV_LOG_FORCE_NOCOLOR'] = '1'
+os.environ['AV_LOG_FORCE_LEVEL'] = '-8'
+os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|loglevel;quiet'
+
 import cv2
 import numpy as np
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -12,13 +20,12 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize
 from PyQt6.QtGui import QImage, QPixmap, QDrag, QIcon
 from datetime import datetime
 import json
-import os
 import socket
 import requests
 from requests.auth import HTTPDigestAuth
 import ipaddress
 import threading
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote
 import struct
 import time
 
@@ -150,6 +157,18 @@ TRANSLATIONS = {
         "label.language": "Sprache:",
         "language.de": "Deutsch",
         "language.en": "English",
+        "battery.warning.title": "⚠️ Akku-Kamera erkannt",
+        "battery.warning.message": "Die Kamera '{name}' ({model}) ist eine Akku-betriebene Kamera.\n\n"
+                                   "⚡ WICHTIG:\n"
+                                   "• RTSP-Streaming ist eingeschränkt (Kamera schläft automatisch)\n"
+                                   "• Akku wird bei Dauerstream stark belastet\n"
+                                   "• Stream kann nach 30-60 Sekunden abbrechen\n\n"
+                                   "💡 EMPFEHLUNG:\n"
+                                   "Verwende Neolink als Proxy für stabiles Streaming:\n"
+                                   "https://github.com/QuantumEntangledAndy/neolink\n\n"
+                                   "Siehe README für Neolink-Konfiguration.\n\n"
+                                   "Kamera trotzdem hinzufügen?",
+        "battery.indicator": "🔋 AKKU",
     },
     "en": {
         "app.title": "Reolink Multi-Camera Viewer",
@@ -257,6 +276,18 @@ TRANSLATIONS = {
         "label.language": "Language:",
         "language.de": "Deutsch",
         "language.en": "English",
+        "battery.warning.title": "⚠️ Battery Camera Detected",
+        "battery.warning.message": "Camera '{name}' ({model}) is battery-powered.\n\n"
+                                   "⚡ IMPORTANT:\n"
+                                   "• RTSP streaming is limited (camera sleeps automatically)\n"
+                                   "• Battery drains quickly with continuous streaming\n"
+                                   "• Stream may disconnect after 30-60 seconds\n\n"
+                                   "💡 RECOMMENDATION:\n"
+                                   "Use Neolink as proxy for stable streaming:\n"
+                                   "https://github.com/QuantumEntangledAndy/neolink\n\n"
+                                   "See README for Neolink configuration.\n\n"
+                                   "Add camera anyway?",
+        "battery.indicator": "🔋 BATTERY",
     },
 }
 
@@ -279,7 +310,10 @@ def tr(key: str, **kwargs) -> str:
 def _parse_rtsp_url(rtsp_url: str):
     """Best-effort RTSP URL parsing (host/port/user/pass)."""
     try:
-        u = urlparse(rtsp_url)
+        u = urlparse(rtsp_url, allow_fragments=False)
+        if not u.hostname and "#" in rtsp_url:
+            sanitized = rtsp_url.replace("#", "%23")
+            u = urlparse(sanitized, allow_fragments=False)
         host = u.hostname
         port = u.port or 554
         user = u.username
@@ -287,6 +321,171 @@ def _parse_rtsp_url(rtsp_url: str):
         return host, port, user, password
     except Exception:
         return None, 554, None, None
+
+
+def _normalize_rtsp_url(rtsp_url: str) -> str:
+    """Normalize RTSP URL to always include explicit port to avoid FFmpeg TCP fallback errors."""
+    try:
+        u = urlparse(rtsp_url)
+        if not u.scheme or u.scheme not in ('rtsp', 'rtsps'):
+            return rtsp_url
+        
+        # Ensure port is explicit
+        port = u.port or 554
+        host = u.hostname
+        if not host:
+            return rtsp_url
+        
+        # Rebuild URL with explicit port
+        auth = f"{u.username}:{u.password}@" if u.username else ""
+        path = u.path or "/"
+        query = f"?{u.query}" if u.query else ""
+        
+        return f"{u.scheme}://{auth}{host}:{port}{path}{query}"
+    except Exception:
+        return rtsp_url
+
+
+def _is_battery_camera(model: str, name: str = "") -> bool:
+    """Check if camera is battery-powered based on model/name."""
+    if not model and not name:
+        return False
+    
+    search_text = f"{model} {name}".lower()
+    
+    # Known battery camera series/models
+    battery_keywords = [
+        "argus",      # Argus series (Argus 2, 3, PT, Eco, Ultra)
+        "go",         # Go series (Go, Go Plus, Go PT)
+        "altas",      # Altas PT Ultra
+        "battery",    # Explicit battery mention
+        "solar",      # Solar-powered (usually battery)
+    ]
+    
+    return any(keyword in search_text for keyword in battery_keywords)
+
+
+def _build_rtsp_url(host: str, port: int = 554, username: str = "", password: str = "", 
+                    path: str = "h264Preview_01_main", scheme: str = "rtsp") -> str:
+    """Build RTSP URL with proper URL-encoding for credentials containing special characters.
+    
+    Args:
+        host: Camera IP or hostname
+        port: RTSP port (default 554)
+        username: Username (will be URL-encoded)
+        password: Password (will be URL-encoded) 
+        path: RTSP path (default h264Preview_01_main)
+        scheme: URL scheme (rtsp or rtsps)
+    
+    Returns:
+        Properly formatted RTSP URL with encoded credentials
+    """
+    # URL-encode credentials to handle special characters like #, @, :, etc.
+    # safe='' means encode ALL special characters
+    encoded_user = quote(username, safe='') if username else ''
+    encoded_pass = quote(password, safe='') if password else ''
+    
+    # Build auth string
+    if encoded_user and encoded_pass:
+        auth = f"{encoded_user}:{encoded_pass}@"
+    elif encoded_user:
+        auth = f"{encoded_user}@"
+    else:
+        auth = ""
+    
+    # Ensure path starts with /
+    if path and not path.startswith('/'):
+        path = f"/{path}"
+    
+    return f"{scheme}://{auth}{host}:{port}{path}"
+
+
+def _toml_escape(value: str) -> str:
+    """Escape TOML string values (" and \\)."""
+    if value is None:
+        return ""
+    return value.replace("\\", "\\\\").replace("\"", "\\\"")
+
+
+def _neolink_camera_name(name: str) -> str:
+    """Normalize camera name for Neolink stream path."""
+    return (name or "Camera").strip().replace(" ", "_")
+
+
+def _neolink_rtsp_url(name: str, port: int = 8554) -> str:
+    cam_name = _neolink_camera_name(name)
+    return f"rtsp://localhost:{port}/{cam_name}/mainStream"
+
+
+def _ensure_neolink_config_entry(name: str, username: str, password: str, host: str, uid: str = "") -> None:
+    """Ensure Neolink config contains a camera entry."""
+    if not host:
+        return
+
+    config_path = os.path.join(os.path.dirname(__file__), "neolink.toml")
+    cam_name = _neolink_camera_name(name)
+    entry_marker = f"name = \"{cam_name}\""
+
+    header = (
+        "# Auto-generated by WildCam\n"
+        "# This file is automatically created from camera_config.json\n\n"
+        "bind = \"0.0.0.0\"\n"
+        "bind_port = 8554\n\n"
+    )
+
+    try:
+        existing = ""
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                existing = f.read()
+            if entry_marker in existing:
+                return
+        else:
+            existing = header
+
+        entry = (
+            f"\n[[cameras]]\n"
+            f"name = \"{_toml_escape(cam_name)}\"\n"
+            f"username = \"{_toml_escape(username)}\"\n"
+            f"password = \"{_toml_escape(password)}\"\n"
+            f"address = \"{_toml_escape(host)}:9000\"\n"
+        )
+        if uid:
+            entry += f"uid = \"{_toml_escape(uid)}\"\n"
+
+        entry += (
+            "\n# Battery optimization\n"
+            "idle_disconnect = true\n\n"
+            "[cameras.pause]\n"
+            "on_client = true\n"
+            "timeout = 2.1\n"
+        )
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write(existing + entry)
+    except Exception as e:
+        print(f"Neolink config error: {e}")
+
+
+def _maybe_use_neolink(rtsp_url: str, name: str, username: str, password: str, uid: str = "", model: str = "", manufacturer: str = "") -> str:
+    """Switch to Neolink for Reolink WLAN/Battery cameras and update neolink.toml."""
+    host, port, user, pwd = _parse_rtsp_url(rtsp_url)
+    if host in ("localhost", "127.0.0.1") and port == 8554:
+        return rtsp_url
+
+    is_reolink = (
+        (manufacturer or "").lower() == "reolink"
+        or "reolink" in (model or "").lower()
+        or port == 9000
+    )
+    use_neolink = port == 9000 or _is_battery_camera(model, name)
+
+    if is_reolink and use_neolink and host:
+        cam_user = username or user or ""
+        cam_pass = password or pwd or ""
+        _ensure_neolink_config_entry(name, cam_user, cam_pass, host, uid)
+        return _neolink_rtsp_url(name)
+    return rtsp_url
 
 
 def _tcp_probe(host: str, port: int, timeout: float = 0.7) -> tuple[bool, str]:
@@ -856,7 +1055,13 @@ class CameraEditDialog(QDialog):
             QMessageBox.warning(self, tr("dialog.title.error"), tr("dialog.edit.err_ip"))
             return
         
-        url = f"rtsp://{username}:{password}@{ip}:{port}/{path}"
+        url = _build_rtsp_url(
+            host=ip,
+            port=int(port),
+            username=username,
+            password=password,
+            path=path
+        )
         self.url_input.setText(url)
     
     def get_camera_data(self):
@@ -1076,8 +1281,8 @@ class CameraThread(QThread):
     def __init__(self, camera_id, rtsp_url, uid=""):
         super().__init__()
         self.camera_id = camera_id
-        # Versuche URLs zu normalisieren (Reolink ist oft empfindlich bei h264 vs h265)
-        self.rtsp_url = rtsp_url
+        # Normalize URL to ensure explicit port (prevents FFmpeg TCP fallback errors)
+        self.rtsp_url = _normalize_rtsp_url(rtsp_url)
         self.uid = uid
         self.running = False
         self.recording = False
@@ -1149,21 +1354,42 @@ class CameraThread(QThread):
                 self.connection_status.emit(False, self.camera_id, tr("camera.status.connecting"))
 
         # RTSP Stream öffnen (mit Fallback-Pfaden für Reolink)
-        # Wir versuchen zuerst den konfigurierten URL
-        self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG)
+        # Use TCP transport to reduce RTP packet loss warnings
+        self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG, [
+            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000,
+            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000
+        ])
         
         # Falls die Kamera nicht öffnet, probieren wir Reolink-typische Varianten (H.264/H.265/Sub)
         if not self.cap.isOpened():
-            base_url = self.rtsp_url.rsplit('/', 1)[0] if '/' in self.rtsp_url else self.rtsp_url
-            for path in self._alt_paths:
-                test_url = f"{base_url}/{path}"
-                if test_url == self.rtsp_url: continue
+            # Parse URL properly to rebuild with alternative paths
+            try:
+                u = urlparse(self.rtsp_url)
+                port = u.port or 554
                 
-                self.connection_status.emit(False, self.camera_id, f"Prüfe Pfad: {path}...")
-                self.cap = cv2.VideoCapture(test_url, cv2.CAP_FFMPEG)
-                if self.cap.isOpened():
-                    self.rtsp_url = test_url
-                    break
+                for path in self._alt_paths:
+                    # Use _build_rtsp_url to properly encode credentials
+                    test_url = _build_rtsp_url(
+                        host=u.hostname,
+                        port=port,
+                        username=u.username or '',
+                        password=u.password or '',
+                        path=path,
+                        scheme=u.scheme
+                    )
+                    if test_url == self.rtsp_url:
+                        continue
+                    
+                    self.connection_status.emit(False, self.camera_id, f"Prüfe Pfad: {path}...")
+                    self.cap = cv2.VideoCapture(test_url, cv2.CAP_FFMPEG, [
+                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000,
+                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, 10000
+                    ])
+                    if self.cap.isOpened():
+                        self.rtsp_url = test_url
+                        break
+            except Exception:
+                pass
         
         if not self.cap.isOpened():
             # Diagnostik: Wenn RTSP zu ist, aber Port 8000 offen, ist RTSP wahrscheinlich in der Kamera deaktiviert
@@ -1282,10 +1508,11 @@ class CameraWidget(QWidget):
     stream_toggled = pyqtSignal(int, bool)
     snapshot_requested = pyqtSignal(int)
 
-    def __init__(self, camera_id, camera_name=""):
+    def __init__(self, camera_id, camera_name="", is_battery=False):
         super().__init__()
         self.camera_id = camera_id
         self.camera_name = camera_name or tr("camera.default_name.id", id=camera_id)
+        self.is_battery = is_battery
         self.recording = False
         self.last_frame_time = datetime.now()
         self.stream_active = False
@@ -1301,7 +1528,8 @@ class CameraWidget(QWidget):
         # Video Label
         self.video_label = QLabel()
         self.video_label.setFixedSize(180, 120)
-        self.video_label.setStyleSheet("border: 2px solid #555; background-color: black;")
+        border_color = "#ff9800" if is_battery else "#555"
+        self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
         self.video_label.setScaledContents(False)
@@ -1309,9 +1537,11 @@ class CameraWidget(QWidget):
         self.video_label.mouseMoveEvent = self._on_video_mouse_move
         self.video_label.mouseReleaseEvent = self._on_video_mouse_release
         
-        # Info Label mit FPS
-        self.info_label = QLabel(f"{self.camera_name} - {tr('camera.status.offline')}")
-        self.info_label.setStyleSheet("color: red; font-weight: bold; font-size: 11px;")
+        # Info Label mit FPS und Battery-Indikator
+        battery_indicator = f" {tr('battery.indicator')}" if is_battery else ""
+        self.info_label = QLabel(f"{self.camera_name}{battery_indicator} - {tr('camera.status.offline')}")
+        label_color = "#ff9800" if is_battery else "red"
+        self.info_label.setStyleSheet(f"color: {label_color}; font-weight: bold; font-size: 11px;")
         self.info_label.setWordWrap(False)
         self.info_label.setFixedHeight(18)
         
@@ -1777,7 +2007,11 @@ class MainWindow(QMainWindow):
         if existing is not None and not self._is_qobject_deleted(existing):
             return existing
 
-        widget = CameraWidget(camera_id, camera_name)
+        # Check if battery camera
+        model = camera.get('model', '')
+        is_battery = _is_battery_camera(model, camera_name)
+        
+        widget = CameraWidget(camera_id, camera_name, is_battery=is_battery)
         widget.remove_btn.clicked.connect(lambda checked, cid=camera_id: self.remove_camera(cid))
         widget.edit_btn.clicked.connect(lambda checked, cid=camera_id: self.edit_camera(cid))
         widget.stream_toggled.connect(self.toggle_camera_stream)
@@ -1808,17 +2042,42 @@ class MainWindow(QMainWindow):
             password = dialog.password_input.text()
             
             added_count = 0
+            battery_cameras = []
+            
             for camera_info in selected_cameras:
                 ip = camera_info['ip']
                 name = camera_info['name']
+                model = camera_info.get('model', '')
+                manufacturer = camera_info.get('manufacturer', '')
+                
+                # Check if battery camera
+                if _is_battery_camera(model, name):
+                    battery_cameras.append((name, model))
                 
                 # RTSP Port bestimmen
                 rtsp_port = 554 if 554 in camera_info['ports'] else (
                     8554 if 8554 in camera_info['ports'] else 554
                 )
                 
-                # RTSP URL generieren (Reolink Standard)
-                rtsp_url = f"rtsp://{username}:{password}@{ip}:{rtsp_port}/h264Preview_01_main"
+                # RTSP URL generieren (Reolink Standard) mit URL-Encoding für Sonderzeichen
+                rtsp_url = _build_rtsp_url(
+                    host=ip,
+                    port=rtsp_port,
+                    username=username,
+                    password=password,
+                    path="h264Preview_01_main"
+                )
+
+                # Reolink WLAN/Battery: automatisch auf Neolink umstellen
+                rtsp_url = _maybe_use_neolink(
+                    rtsp_url=rtsp_url,
+                    name=name,
+                    username=username,
+                    password=password,
+                    uid=camera_info.get('uid', ''),
+                    model=model,
+                    manufacturer=manufacturer
+                )
                 
                 # Prüfe ob Kamera bereits existiert
                 if any(c['url'] == rtsp_url for c in self.cameras):
@@ -1832,11 +2091,14 @@ class MainWindow(QMainWindow):
                     'id': camera_id,
                     'url': rtsp_url,
                     'name': name,
-                    'uid': camera_info.get('uid', '')
+                    'uid': camera_info.get('uid', ''),
+                    'model': model,
+                    'manufacturer': manufacturer
                 })
                 
                 # Widget erstellen
-                widget = CameraWidget(camera_id, name)
+                is_battery = _is_battery_camera(model, name)
+                widget = CameraWidget(camera_id, name, is_battery=is_battery)
                 widget.remove_btn.clicked.connect(lambda checked, cid=camera_id: self.remove_camera(cid))
                 widget.edit_btn.clicked.connect(lambda checked, cid=camera_id: self.edit_camera(cid))
                 widget.stream_toggled.connect(self.toggle_camera_stream)
@@ -1851,6 +2113,18 @@ class MainWindow(QMainWindow):
                 self.update_status_display()
                 self.save_config()
                 self.statusBar().showMessage(tr("status.auto_added", count=added_count))
+                
+                # Show battery camera warning if any detected
+                if battery_cameras:
+                    cam_list = "\n".join([f"• {name} ({model})" for name, model in battery_cameras])
+                    QMessageBox.warning(
+                        self,
+                        tr("battery.warning.title"),
+                        f"{len(battery_cameras)} {tr('battery.indicator')}:\n\n{cam_list}\n\n" + 
+                        tr("battery.warning.message", name="", model="").replace("Die Kamera '' () ist eine Akku-betriebene Kamera.", 
+                           "Diese Kameras sind Akku-betrieben.").replace("Camera '' () is battery-powered.", 
+                           "These cameras are battery-powered.")
+                    )
     
     def add_camera(self):
         """Kamera hinzufügen"""
@@ -1867,16 +2141,39 @@ class MainWindow(QMainWindow):
         
         camera_name = name if name else tr("camera.default_name.id", id=camera_id)
         
+        # Check if battery camera and show warning
+        if _is_battery_camera("", camera_name):
+            reply = QMessageBox.question(
+                self,
+                tr("battery.warning.title"),
+                tr("battery.warning.message", name=camera_name, model="Battery Camera"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+
+        # Reolink WLAN/Battery (Port 9000) automatisch auf Neolink umstellen
+        url = _maybe_use_neolink(
+            rtsp_url=url,
+            name=camera_name,
+            username="",
+            password="",
+            uid=uid
+        )
+        
         # Kamera zur Liste hinzufügen
         self.cameras.append({
             'id': camera_id, 
             'url': url, 
             'name': camera_name,
-            'uid': uid
+            'uid': uid,
+            'model': ''  # Model info not available from manual add
         })
         
         # Widget erstellen
-        widget = CameraWidget(camera_id, camera_name)
+        is_battery = _is_battery_camera('', camera_name)
+        widget = CameraWidget(camera_id, camera_name, is_battery=is_battery)
         widget.remove_btn.clicked.connect(lambda: self.remove_camera(camera_id))
         widget.edit_btn.clicked.connect(lambda: self.edit_camera(camera_id))
         widget.clicked.connect(self.select_camera)
@@ -1917,6 +2214,17 @@ class MainWindow(QMainWindow):
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
             updated_data = dialog.get_camera_data()
+
+            # Reolink WLAN/Battery (Port 9000) automatisch auf Neolink umstellen
+            updated_data['url'] = _maybe_use_neolink(
+                rtsp_url=updated_data.get('url', ''),
+                name=updated_data.get('name', ''),
+                username="",
+                password="",
+                uid=updated_data.get('uid', ''),
+                model=camera_data.get('model', ''),
+                manufacturer=camera_data.get('manufacturer', '')
+            )
             
             # Daten aktualisieren
             for camera in self.cameras:
@@ -2343,6 +2651,24 @@ class MainWindow(QMainWindow):
                         fixed_config = True # Sorgen wir dafür, dass es gespeichert wird
                     deduped_by_url.append(c)
 
+                # Reolink WLAN/Baichuan URLs beim Laden automatisch auf Neolink umstellen
+                for c in deduped_by_url:
+                    url = (c.get('url') or '').strip()
+                    if not url:
+                        continue
+                    new_url = _maybe_use_neolink(
+                        rtsp_url=url,
+                        name=c.get('name', ''),
+                        username="",
+                        password="",
+                        uid=c.get('uid', ''),
+                        model=c.get('model', ''),
+                        manufacturer=c.get('manufacturer', '')
+                    )
+                    if new_url != url:
+                        c['url'] = new_url
+                        fixed_config = True
+
                 self.cameras = deduped_by_url
                 self.recording_path = config.get('recording_path', self.recording_path)
                 self.snapshot_path = os.path.join(self.recording_path, "snapshots")
@@ -2525,6 +2851,8 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    cv2.setLogLevel(0)
+    
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     

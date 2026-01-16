@@ -1,4 +1,6 @@
 camera_config.json
+camera_config.json.backup
+neolink.toml
 
 __pycache__/
 *.py[cod]

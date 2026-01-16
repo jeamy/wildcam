@@ -1,0 +1,16 @@
+services:
+  neolink:
+    image: quantumentangledandy/neolink:latest
+    container_name: wildcam-neolink
+    network_mode: host
+    command: ["neolink", "rtsp", "--config=/etc/neolink.toml"]
+    volumes:
+      - ./neolink.toml:/etc/neolink.toml:ro
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
