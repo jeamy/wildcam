@@ -168,20 +168,9 @@ When you add found Reolink WLAN/battery cameras, WildCam will automatically:
 - update `neolink.toml`
 - store `localhost:8554/...` URLs in `camera_config.json`
 
-⚠️ **Note:** Battery cameras in **sleep mode cannot be discovered**. They must be:
-- Manually triggered to wake up first (e.g., via PIR motion or Reolink app)
-- Connected through a Reolink NVR/Home Hub (which will be discovered)
-- Or added manually using the camera's UID (see Battery Cameras section below)
-
 Neolink is a **proxy** and does not magically discover/wake sleeping cameras. The camera still needs to be reachable (awake) for discovery and for Neolink to connect.
 
-## Battery Cameras (Argus, Go, Altas)
-
-⚠️ **Important:** Battery-powered Reolink cameras (Argus PT Ultra, Go Plus, etc.) have **limited RTSP support**:
-- They sleep automatically to preserve battery
-- RTSP stream disconnects after 30-60 seconds of inactivity
-- Continuous streaming heavily drains the battery
-- Direct RTSP streaming is **not recommended**
+## Battery Cameras
 
 ### Automatic Neolink Setup ⭐
 
