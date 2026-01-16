@@ -1507,6 +1507,7 @@ class CameraWidget(QWidget):
     clicked = pyqtSignal(int)
     stream_toggled = pyqtSignal(int, bool)
     snapshot_requested = pyqtSignal(int)
+    selection_changed = pyqtSignal(int, bool)
 
     def __init__(self, camera_id, camera_name="", is_battery=False):
         super().__init__()
@@ -1520,10 +1521,42 @@ class CameraWidget(QWidget):
         self._drag_start_pos = None
         self._video_drag_start_pos = None
         self._video_dragging = False
+        self.is_selected_for_view = False
         
         layout = QVBoxLayout()
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(4)
+        
+        # Checkbox für Multi-Kamera-Auswahl
+        checkbox_layout = QHBoxLayout()
+        checkbox_layout.setContentsMargins(4, 2, 4, 2)
+        self.view_checkbox = QCheckBox("✓")
+        self.view_checkbox.setToolTip("Kamera in großer Ansicht anzeigen")
+        self.view_checkbox.setStyleSheet("""
+            QCheckBox {
+                font-weight: bold;
+                font-size: 10px;
+                color: #4CAF50;
+            }
+            QCheckBox::indicator {
+                width: 14px;
+                height: 14px;
+                border: 2px solid #4CAF50;
+                border-radius: 2px;
+                background-color: #2b2b2b;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4CAF50;
+                border-color: #4CAF50;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #66BB6A;
+            }
+        """)
+        self.view_checkbox.stateChanged.connect(self._on_checkbox_changed)
+        checkbox_layout.addWidget(self.view_checkbox)
+        checkbox_layout.addStretch()
+        layout.addLayout(checkbox_layout)
         
         # Video Label
         self.video_label = QLabel()
@@ -1533,6 +1566,7 @@ class CameraWidget(QWidget):
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
         self.video_label.setScaledContents(False)
+        self.video_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.video_label.mousePressEvent = self._on_video_mouse_press
         self.video_label.mouseMoveEvent = self._on_video_mouse_move
         self.video_label.mouseReleaseEvent = self._on_video_mouse_release
@@ -1612,7 +1646,7 @@ class CameraWidget(QWidget):
         self.setLayout(layout)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(200)
-        self.setFixedHeight(120 + 18 + 24 + 16)
+        self.setFixedHeight(120 + 18 + 24 + 16 + 24)
 
         self.set_selected(False)
 
@@ -1763,11 +1797,16 @@ class CameraWidget(QWidget):
     def _request_snapshot(self):
         self.snapshot_requested.emit(self.camera_id)
 
-    def set_selected(self, selected: bool):
+    def _on_checkbox_changed(self, state):
+        self.is_selected_for_view = (state == Qt.CheckState.Checked.value)
+        self.selection_changed.emit(self.camera_id, self.is_selected_for_view)
+    
+    def set_selected(self, selected):
         if selected:
-            self.video_label.setStyleSheet("border: 2px solid #1976d2; background-color: black;")
+            self.video_label.setStyleSheet("border: 2px solid #4CAF50; background-color: black;")
         else:
-            self.video_label.setStyleSheet("border: 2px solid #555; background-color: black;")
+            border_color = "#ff9800" if self.is_battery else "#555"
+            self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
 
 
 class MainWindow(QMainWindow):
@@ -1787,6 +1826,8 @@ class MainWindow(QMainWindow):
         self.cameras_per_row = 3  # Standard: 3 Kameras pro Reihe
         self.next_camera_id = 1
         self.selected_camera_id = None
+        self.selected_camera_ids = []  # Multi-Kamera-Auswahl
+        self.multi_view_labels = {}  # Labels für Multi-Kamera-Ansicht
         self._rebuilding_camera_list = False
         self._pending_order_apply = False
         self._closing = False
@@ -2017,6 +2058,7 @@ class MainWindow(QMainWindow):
         widget.stream_toggled.connect(self.toggle_camera_stream)
         widget.clicked.connect(self.select_camera)
         widget.snapshot_requested.connect(self.save_camera_snapshot)
+        widget.selection_changed.connect(self.on_camera_selection_changed)
         widget.record_btn.clicked.connect(lambda checked, cid=camera_id, w=widget: self._on_record_btn_clicked(cid, w, checked))
         self.camera_widgets[camera_id] = widget
         return widget
@@ -2485,8 +2527,13 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 return
 
-        if self.selected_camera_id == camera_id:
+        # Update big preview for single camera selection (old behavior)
+        if self.selected_camera_id == camera_id and len(self.selected_camera_ids) == 0:
             self._update_big_preview_frame(frame)
+        
+        # Update multi-view if camera is selected via checkbox
+        if camera_id in self.selected_camera_ids:
+            self._update_multi_view_frame(frame, camera_id)
     
     def update_camera_status(self, connected, camera_id, message):
         """Status einer Kamera aktualisieren"""
@@ -2825,6 +2872,102 @@ class MainWindow(QMainWindow):
         self.save_config()
         self.update_grid_layout()
 
+    def on_camera_selection_changed(self, camera_id, selected):
+        """Handle checkbox selection change for multi-camera view"""
+        if selected:
+            if camera_id not in self.selected_camera_ids:
+                self.selected_camera_ids.append(camera_id)
+        else:
+            if camera_id in self.selected_camera_ids:
+                self.selected_camera_ids.remove(camera_id)
+        
+        self._rebuild_multi_view_layout()
+        
+        # Start streams for selected cameras
+        for cid in self.selected_camera_ids:
+            if cid not in self.camera_threads or not self.camera_threads[cid].isRunning():
+                self.start_single_stream(cid)
+    
+    def _rebuild_multi_view_layout(self):
+        """Rebuild the big preview layout based on selected cameras"""
+        # Clear existing layout
+        while self.big_preview_layout.count():
+            item = self.big_preview_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+        
+        self.multi_view_labels.clear()
+        
+        num_selected = len(self.selected_camera_ids)
+        
+        if num_selected == 0:
+            # No selection - show default message
+            label = QLabel()
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setText(tr("big.select_camera"))
+            label.setStyleSheet("border: 2px solid #555; background-color: black;")
+            label.setMinimumHeight(360)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            self.big_preview_layout.addWidget(label)
+            self.big_preview_label = label
+        elif num_selected == 1:
+            # Single camera - full view
+            label = QLabel()
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setStyleSheet("border: 2px solid #555; background-color: black;")
+            label.setMinimumHeight(360)
+            label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            self.big_preview_layout.addWidget(label)
+            self.big_preview_label = label
+            self.multi_view_labels[self.selected_camera_ids[0]] = label
+        else:
+            # Multi-camera grid view
+            # Calculate grid: 2 cameras = 1 row x 2 cols, 3-4 = 2 rows, 5-6 = 3 rows, etc.
+            cols = 2
+            rows = (num_selected + 1) // 2
+            
+            for row in range(rows):
+                row_layout = QHBoxLayout()
+                row_layout.setSpacing(4)
+                
+                for col in range(cols):
+                    idx = row * cols + col
+                    if idx >= num_selected:
+                        # Add empty spacer for incomplete last row
+                        spacer = QWidget()
+                        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                        row_layout.addWidget(spacer)
+                        continue
+                    
+                    camera_id = self.selected_camera_ids[idx]
+                    label = QLabel()
+                    label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                    label.setStyleSheet("border: 2px solid #555; background-color: black;")
+                    label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                    label.setMinimumHeight(180)
+                    label.setScaledContents(False)
+                    
+                    widget = self.camera_widgets.get(camera_id)
+                    if widget:
+                        label.setText(f"{widget.camera_name}\n{tr('camera.preview.waiting')}")
+                    
+                    row_layout.addWidget(label)
+                    self.multi_view_labels[camera_id] = label
+                
+                # Set equal stretch for all rows
+                self.big_preview_layout.addLayout(row_layout, 1)
+    
+    def _clear_layout(self, layout):
+        """Recursively clear a layout"""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                self._clear_layout(item.layout())
+
     def _update_big_preview_frame(self, frame):
         display_w = max(1, self.big_preview_label.width())
         display_h = max(1, self.big_preview_label.height())
@@ -2848,6 +2991,35 @@ class MainWindow(QMainWindow):
         bytes_per_line = ch * w
         qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
         self.big_preview_label.setPixmap(QPixmap.fromImage(qt_image))
+    
+    def _update_multi_view_frame(self, frame, camera_id):
+        """Update frame in multi-camera view"""
+        label = self.multi_view_labels.get(camera_id)
+        if not label:
+            return
+        
+        display_w = label.width()
+        display_h = label.height()
+        
+        if display_w <= 0 or display_h <= 0:
+            return
+        
+        src_h, src_w = frame.shape[:2]
+        if src_w <= 0 or src_h <= 0:
+            return
+        
+        scale = min(display_w / src_w, display_h / src_h)
+        new_w = max(1, int(src_w * scale))
+        new_h = max(1, int(src_h * scale))
+        
+        frame_resized = cv2.resize(frame, (new_w, new_h))
+        rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(qt_image)
+        label.setPixmap(pixmap)
 
 
 def main():
