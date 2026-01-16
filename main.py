@@ -2763,6 +2763,10 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def select_camera(self, camera_id):
+        # If multi-view is active (checkboxes), don't use old single-camera selection
+        if len(self.selected_camera_ids) > 0:
+            return
+        
         self.selected_camera_id = camera_id
 
         for cid, widget in self.camera_widgets.items():
@@ -2772,11 +2776,15 @@ class MainWindow(QMainWindow):
                 widget.set_selected(False)
 
         widget = self.camera_widgets.get(camera_id)
-        if widget:
-            if camera_id in self.camera_threads and self.camera_threads[camera_id].isRunning():
-                self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.waiting')}")
-            else:
-                self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.click_to_start')}")
+        if widget and hasattr(self, 'big_preview_label') and self.big_preview_label is not None:
+            try:
+                if camera_id in self.camera_threads and self.camera_threads[camera_id].isRunning():
+                    self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.waiting')}")
+                else:
+                    self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.click_to_start')}")
+            except RuntimeError:
+                # Label was deleted during multi-view rebuild
+                pass
 
         if camera_id not in self.camera_threads or not self.camera_threads[camera_id].isRunning():
             self.start_single_stream(camera_id)
@@ -2945,8 +2953,10 @@ class MainWindow(QMainWindow):
                     label = QLabel()
                     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     label.setStyleSheet("border: 2px solid #555; background-color: black;")
-                    label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Expanding)
                     label.setMinimumHeight(180)
+                    label.setMinimumWidth(100)
+                    label.setMaximumWidth(16777215)  # Qt max
                     label.setScaledContents(False)
                     
                     widget = self.camera_widgets.get(camera_id)
@@ -2993,32 +3003,50 @@ class MainWindow(QMainWindow):
         self.big_preview_label.setPixmap(QPixmap.fromImage(qt_image))
     
     def _update_multi_view_frame(self, frame, camera_id):
-        """Update frame in multi-camera view"""
+        """Update frame in multi-camera view with aspect ratio preservation"""
         label = self.multi_view_labels.get(camera_id)
         if not label:
             return
         
+        # Get current label size and lock it
         display_w = label.width()
         display_h = label.height()
         
-        if display_w <= 0 or display_h <= 0:
+        if display_w <= 10 or display_h <= 10:
             return
         
         src_h, src_w = frame.shape[:2]
         if src_w <= 0 or src_h <= 0:
             return
         
+        # Calculate scale to fit within label while preserving aspect ratio
         scale = min(display_w / src_w, display_h / src_h)
         new_w = max(1, int(src_w * scale))
         new_h = max(1, int(src_h * scale))
         
+        # Resize frame
         frame_resized = cv2.resize(frame, (new_w, new_h))
-        rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        rgb_small = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        
+        # Create black background with exact label size
+        rgb_frame = np.zeros((display_h, display_w, 3), dtype=np.uint8)
+        
+        # Center the resized frame
+        x = (display_w - new_w) // 2
+        y = (display_h - new_h) // 2
+        rgb_frame[y:y + new_h, x:x + new_w] = rgb_small
         
         h, w, ch = rgb_frame.shape
         bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        
+        # Create QImage with explicit copy to avoid reference issues
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qt_image)
+        
+        # Scale pixmap to exact label size to prevent expansion
+        if pixmap.width() != display_w or pixmap.height() != display_h:
+            pixmap = pixmap.scaled(display_w, display_h, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.FastTransformation)
+        
         label.setPixmap(pixmap)
 
 
