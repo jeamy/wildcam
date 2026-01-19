@@ -3163,7 +3163,12 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    cv2.setLogLevel(0)
+    # Try to reduce OpenCV logging noise if the function exists in this build
+    try:
+        cv2.setLogLevel(0)
+    except AttributeError:
+        # Older Fedora/OpenCV builds may not provide setLogLevel; ignore in that case
+        pass
     
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
