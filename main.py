@@ -1810,11 +1810,28 @@ class CameraWidget(QWidget):
 
 
 class PreviewLabel(QLabel):
+    clicked = pyqtSignal(int)
+    double_clicked = pyqtSignal(int)
+
+    def __init__(self, camera_id=None, parent=None):
+        super().__init__(parent)
+        self.camera_id = camera_id
+
     def sizeHint(self):
         return QSize(0, 0)
 
     def minimumSizeHint(self):
         return QSize(0, 0)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.camera_id is not None:
+            self.clicked.emit(int(self.camera_id))
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.camera_id is not None:
+            self.double_clicked.emit(int(self.camera_id))
+        super().mouseDoubleClickEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -1836,6 +1853,7 @@ class MainWindow(QMainWindow):
         self.selected_camera_id = None
         self.selected_camera_ids = []  # Multi-Kamera-Auswahl
         self.multi_view_labels = {}  # Labels für Multi-Kamera-Ansicht
+        self.zoomed_camera_id = None
         self._rebuilding_camera_list = False
         self._pending_order_apply = False
         self._closing = False
@@ -2896,6 +2914,9 @@ class MainWindow(QMainWindow):
         else:
             if camera_id in self.selected_camera_ids:
                 self.selected_camera_ids.remove(camera_id)
+
+        if self.zoomed_camera_id is not None and self.zoomed_camera_id not in self.selected_camera_ids:
+            self.zoomed_camera_id = None
         
         self._rebuild_multi_view_layout()
         
@@ -2918,7 +2939,11 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'multi_view_close_buttons'):
             self.multi_view_close_buttons.clear()
         
-        num_selected = len(self.selected_camera_ids)
+        selected_ids = list(self.selected_camera_ids)
+        if self.zoomed_camera_id is not None and self.zoomed_camera_id in selected_ids:
+            selected_ids = [self.zoomed_camera_id]
+
+        num_selected = len(selected_ids)
         
         if num_selected == 0:
             # No selection - show default message
@@ -2932,16 +2957,18 @@ class MainWindow(QMainWindow):
             self.big_preview_label = label
         elif num_selected == 1:
             # Single camera - full view
-            label = PreviewLabel()
+            camera_id = selected_ids[0]
+            label = PreviewLabel(camera_id)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setStyleSheet("border: 2px solid #555; background-color: black;")
             label.setMinimumHeight(360)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
             self.big_preview_layout.addWidget(label)
             self.big_preview_label = label
-            self.multi_view_labels[self.selected_camera_ids[0]] = label
+            self.multi_view_labels[camera_id] = label
 
-            camera_id = self.selected_camera_ids[0]
+            label.double_clicked.connect(self._on_multi_view_label_double_clicked)
+
             close_btn = QPushButton()
             close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
             close_btn.setIconSize(QSize(14, 14))
@@ -2989,7 +3016,7 @@ class MainWindow(QMainWindow):
                         row_layout.addWidget(spacer, 1)
                         continue
                     
-                    camera_id = self.selected_camera_ids[idx]
+                    camera_id = selected_ids[idx]
                     
                     # Container for label + close button
                     container = QWidget()
@@ -2999,7 +3026,7 @@ class MainWindow(QMainWindow):
                     container_layout.setSpacing(0)
                     
                     # Label for video
-                    label = PreviewLabel()
+                    label = PreviewLabel(camera_id)
                     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     label.setStyleSheet("border: 2px solid #555; background-color: black;")
                     label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -3007,6 +3034,8 @@ class MainWindow(QMainWindow):
                     label.setMinimumWidth(0)
                     label.setMaximumWidth(16777215)  # Qt max
                     label.setScaledContents(False)
+
+                    label.double_clicked.connect(self._on_multi_view_label_double_clicked)
                     
                     widget = self.camera_widgets.get(camera_id)
                     if widget:
@@ -3068,6 +3097,9 @@ class MainWindow(QMainWindow):
         # Remove from selected list
         if camera_id in self.selected_camera_ids:
             self.selected_camera_ids.remove(camera_id)
+
+        if self.zoomed_camera_id == camera_id:
+            self.zoomed_camera_id = None
         
         # Uncheck the checkbox in the camera widget
         widget = self.camera_widgets.get(camera_id)
@@ -3081,6 +3113,19 @@ class MainWindow(QMainWindow):
             del self.multi_view_close_buttons[camera_id]
         
         # Rebuild the multi-view layout
+        self._rebuild_multi_view_layout()
+
+    def _on_multi_view_label_double_clicked(self, camera_id):
+        if self.zoomed_camera_id is None:
+            if len(self.selected_camera_ids) <= 1:
+                return
+            if camera_id not in self.selected_camera_ids:
+                return
+            self.zoomed_camera_id = camera_id
+            self._rebuild_multi_view_layout()
+            return
+
+        self.zoomed_camera_id = None
         self._rebuild_multi_view_layout()
     
     def _clear_layout(self, layout):
