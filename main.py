@@ -456,9 +456,8 @@ def _ensure_neolink_config_entry(name: str, username: str, password: str, host: 
         entry += (
             "\n# Battery optimization\n"
             "idle_disconnect = true\n\n"
-            "[cameras.pause]\n"
-            "on_client = true\n"
-            "timeout = 2.1\n"
+            "pause.on_client = true\n"
+            "pause.timeout = 2.1\n"
         )
 
         with open(config_path, "w", encoding="utf-8") as f:

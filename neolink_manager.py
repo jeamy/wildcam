@@ -119,9 +119,8 @@ address = "{url_info['host']}:9000"
 # Battery optimization
 idle_disconnect = true
 
-[cameras.pause]
-on_client = true
-timeout = 2.1
+pause.on_client = true
+pause.timeout = 2.1
 
 """
     
