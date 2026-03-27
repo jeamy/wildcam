@@ -30,7 +30,7 @@ jobs:
           ref: ${{ inputs.source_ref }}
           fetch-depth: 0
 
-      - name: Create tag if missing
+      - name: Create or move tag
         id: prepare
         shell: bash
         run: |
@@ -43,11 +43,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          EXISTING_SHA=""
           if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists."
+            EXISTING_SHA="$(git rev-list -n 1 "$TAG")"
+          fi
+
+          if [[ "$EXISTING_SHA" == "$TARGET_SHA" ]]; then
+            echo "Tag $TAG already points to $TARGET_SHA."
           else
-            git tag "$TAG" "$TARGET_SHA"
-            git push origin "refs/tags/$TAG"
+            git tag -f "$TAG" "$TARGET_SHA"
+            git push --force origin "refs/tags/$TAG"
           fi
 
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
