@@ -10,7 +10,7 @@ on:
       source_ref:
         description: "Branch, tag or commit to tag and build"
         required: true
-        default: "main"
+        default: "master"
         type: string
 
 permissions:
