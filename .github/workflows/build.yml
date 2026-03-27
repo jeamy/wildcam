@@ -70,8 +70,10 @@ jobs:
             platform: linux
           - os: windows-latest
             platform: windows
+          - os: macos-15-intel
+            platform: macos-intel
           - os: macos-15
-            platform: macos
+            platform: macos-silicon
 
     steps:
       - name: Checkout
@@ -115,7 +117,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           chmod +x scripts/build_macos.sh
-          PYTHON_BIN=python PLATFORM=macos ARTIFACT_SUFFIX=${{ needs.prepare.outputs.tag }} ./scripts/build_macos.sh
+          PYTHON_BIN=python PLATFORM=${{ matrix.platform }} ARTIFACT_SUFFIX=${{ needs.prepare.outputs.tag }} ./scripts/build_macos.sh
 
       - name: Build on Windows
         if: runner.os == 'Windows'
