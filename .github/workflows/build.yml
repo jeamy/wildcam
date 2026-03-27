@@ -7,12 +7,54 @@ on:
         description: "Git tag to build and release, e.g. v1.0.0"
         required: true
         type: string
+      source_ref:
+        description: "Branch, tag or commit to tag and build"
+        required: true
+        default: "main"
+        type: string
 
 permissions:
   contents: write
 
 jobs:
+  prepare:
+    name: Prepare tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.prepare.outputs.tag }}
+      target_sha: ${{ steps.prepare.outputs.target_sha }}
+    steps:
+      - name: Checkout source ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Create tag if missing
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag }}"
+
+          git fetch --tags --force
+          TARGET_SHA="$(git rev-parse HEAD)"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists."
+          else
+            git tag "$TAG" "$TARGET_SHA"
+            git push origin "refs/tags/$TAG"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     name: ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -23,14 +65,14 @@ jobs:
             platform: linux
           - os: windows-latest
             platform: windows
-          - os: macos-13
+          - os: macos-15
             platform: macos
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ inputs.tag }}
+          ref: refs/tags/${{ needs.prepare.outputs.tag }}
           fetch-depth: 0
 
       - name: Setup Python
@@ -83,9 +125,9 @@ jobs:
           if-no-files-found: error
 
       - name: Publish release assets
-        if: startsWith(inputs.tag, 'v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.target_sha }}
           files: dist/*_${{ matrix.platform }}_*.zip
           generate_release_notes: true
