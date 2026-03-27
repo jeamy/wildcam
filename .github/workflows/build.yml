@@ -91,7 +91,6 @@ jobs:
             libegl1 \
             libgl1 \
             libglib2.0-0 \
-            patchelf \
             libxkbcommon-x11-0 \
             libxcb-cursor0 \
             libxcb-icccm4 \

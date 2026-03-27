@@ -86,10 +86,11 @@ TS="$(date +%Y%m%d_%H%M%S)"
 APPDIR_PATH="$BUILD_DIR/${APP_NAME}.AppDir"
 APPDIR_USR_BIN="$APPDIR_PATH/usr/bin"
 APPDIR_USR_LIB="$APPDIR_PATH/usr/lib/$APP_NAME"
+APPDIR_APPRUN="$APPDIR_PATH/AppRun"
 DESKTOP_FILE="$BUILD_DIR/${APP_NAME}.desktop"
 ICON_PATH="$BUILD_DIR/${APP_NAME}.png"
 LAUNCHER_PATH="$APPDIR_USR_BIN/$APP_NAME"
-APPIMAGE_TOOL="$BUILD_DIR/linuxdeploy-x86_64.AppImage"
+APPIMAGE_TOOL="$BUILD_DIR/appimagetool-x86_64.AppImage"
 
 rm -rf "$APPDIR_PATH"
 mkdir -p "$APPDIR_USR_BIN" "$APPDIR_USR_LIB"
@@ -102,6 +103,14 @@ HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
 exec "\$HERE/../lib/$APP_NAME/$APP_NAME" "\$@"
 EOF
 chmod +x "$LAUNCHER_PATH"
+
+cat > "$APPDIR_APPRUN" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+exec "\$HERE/usr/bin/$APP_NAME" "\$@"
+EOF
+chmod +x "$APPDIR_APPRUN"
 
 cat > "$DESKTOP_FILE" <<EOF
 [Desktop Entry]
@@ -134,28 +143,25 @@ PY
 if [[ ! -f "$APPIMAGE_TOOL" ]]; then
   curl -fsSL \
     -o "$APPIMAGE_TOOL" \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+    "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
   chmod +x "$APPIMAGE_TOOL"
 fi
 
-rm -f "$REPO_ROOT"/${APP_NAME}*-x86_64.AppImage
+APPIMAGE_FINAL="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.AppImage"
+cp "$DESKTOP_FILE" "$APPDIR_PATH/${APP_NAME}.desktop"
+cp "$ICON_PATH" "$APPDIR_PATH/${APP_NAME}.png"
 
 APPIMAGE_EXTRACT_AND_RUN=1 \
+ARCH=x86_64 \
 VERSION="$APP_VERSION" \
 "$APPIMAGE_TOOL" \
-  --appdir "$APPDIR_PATH" \
-  --desktop-file "$DESKTOP_FILE" \
-  --icon-file "$ICON_PATH" \
-  --output appimage
+  "$APPDIR_PATH" \
+  "$APPIMAGE_FINAL"
 
-APPIMAGE_PATH="$(find "$REPO_ROOT" -maxdepth 1 -type f -name "${APP_NAME}*-x86_64.AppImage" | head -n 1)"
-if [[ -z "$APPIMAGE_PATH" || ! -f "$APPIMAGE_PATH" ]]; then
-  echo "Build failed: AppImage not found" >&2
+if [[ ! -f "$APPIMAGE_FINAL" ]]; then
+  echo "Build failed: AppImage not found at $APPIMAGE_FINAL" >&2
   exit 1
 fi
-
-APPIMAGE_FINAL="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.AppImage"
-mv "$APPIMAGE_PATH" "$APPIMAGE_FINAL"
 
 ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.zip"
 
