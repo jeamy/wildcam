@@ -5,6 +5,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 APP_NAME="${APP_NAME:-wildcam}"
 ENTRY_POINT="${ENTRY_POINT:-main.py}"
 PLATFORM="${PLATFORM:-linux}"
+APP_VERSION="${APP_VERSION:-dev}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -81,10 +82,86 @@ if [[ -f "neolink.toml" ]]; then
 fi
 
 TS="$(date +%Y%m%d_%H%M%S)"
+
+APPDIR_PATH="$BUILD_DIR/${APP_NAME}.AppDir"
+APPDIR_USR_BIN="$APPDIR_PATH/usr/bin"
+APPDIR_USR_LIB="$APPDIR_PATH/usr/lib/$APP_NAME"
+DESKTOP_FILE="$BUILD_DIR/${APP_NAME}.desktop"
+ICON_PATH="$BUILD_DIR/${APP_NAME}.png"
+LAUNCHER_PATH="$APPDIR_USR_BIN/$APP_NAME"
+APPIMAGE_TOOL="$BUILD_DIR/linuxdeploy-x86_64.AppImage"
+
+rm -rf "$APPDIR_PATH"
+mkdir -p "$APPDIR_USR_BIN" "$APPDIR_USR_LIB"
+cp -a "$BUNDLE_PATH/." "$APPDIR_USR_LIB/"
+
+cat > "$LAUNCHER_PATH" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
+exec "\$HERE/../lib/$APP_NAME/$APP_NAME" "\$@"
+EOF
+chmod +x "$LAUNCHER_PATH"
+
+cat > "$DESKTOP_FILE" <<EOF
+[Desktop Entry]
+Type=Application
+Name=WildCam
+Exec=$APP_NAME
+Icon=$APP_NAME
+Categories=AudioVideo;Video;Viewer;
+Terminal=false
+EOF
+
+export QT_QPA_PLATFORM=offscreen
+export ICON_PATH
+"$PY" - <<PY
+import os
+import sys
+from PyQt6.QtGui import QGuiApplication, QIcon
+
+icon_path = os.environ["ICON_PATH"]
+app = QGuiApplication([])
+icon = QIcon(os.path.join("assets", "icons", "camera.svg"))
+pixmap = icon.pixmap(256, 256)
+if pixmap.isNull():
+    raise SystemExit("Failed to render icon from assets/icons/camera.svg")
+if not pixmap.save(icon_path, "PNG"):
+    raise SystemExit(f"Failed to save icon to {icon_path}")
+print(f"ICON: {icon_path}")
+PY
+
+if [[ ! -f "$APPIMAGE_TOOL" ]]; then
+  curl -fsSL \
+    -o "$APPIMAGE_TOOL" \
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+  chmod +x "$APPIMAGE_TOOL"
+fi
+
+rm -f "$REPO_ROOT"/${APP_NAME}*-x86_64.AppImage
+
+APPIMAGE_EXTRACT_AND_RUN=1 \
+VERSION="$APP_VERSION" \
+"$APPIMAGE_TOOL" \
+  --appdir "$APPDIR_PATH" \
+  --desktop-file "$DESKTOP_FILE" \
+  --icon-file "$ICON_PATH" \
+  --output appimage
+
+APPIMAGE_PATH="$(find "$REPO_ROOT" -maxdepth 1 -type f -name "${APP_NAME}*-x86_64.AppImage" | head -n 1)"
+if [[ -z "$APPIMAGE_PATH" || ! -f "$APPIMAGE_PATH" ]]; then
+  echo "Build failed: AppImage not found" >&2
+  exit 1
+fi
+
+APPIMAGE_FINAL="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.AppImage"
+mv "$APPIMAGE_PATH" "$APPIMAGE_FINAL"
+
 ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.zip"
 
 export BUNDLE_PATH
 export ZIP_PATH
+export APPIMAGE_FINAL
 
 "$PY" - <<PY
 import os
@@ -102,4 +179,5 @@ with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
 
 print(f"BUNDLE: {bundle_path}")
 print(f"ZIP: {zip_path}")
+print(f"APPIMAGE: {os.environ.get('APPIMAGE_FINAL')}")
 PY
