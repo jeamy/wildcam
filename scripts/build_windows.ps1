@@ -38,21 +38,42 @@ if (Test-Path $buildDir) { Remove-Item $buildDir -Recurse -Force }
 & $python -m PyInstaller `
   --noconfirm `
   --clean `
-  --onefile `
+  --onedir `
   --windowed `
   --name $AppName `
+  --add-data "assets/icons;assets/icons" `
+  --collect-all "PyQt6" `
+  --collect-all "cv2" `
+  --collect-all "numpy" `
   $EntryPoint
 
-$exePath = Join-Path $distDir ("{0}.exe" -f $AppName)
-if (!(Test-Path $exePath)) {
-  throw "Build failed: EXE not found at $exePath"
+$bundlePath = Join-Path $distDir $AppName
+if (!(Test-Path $bundlePath)) {
+  throw "Build failed: bundle not found at $bundlePath"
+}
+
+$extraFiles = @(
+  "README.md",
+  "docker-compose.yml",
+  "neolink_manager.py",
+  "camera_config.json.example"
+)
+
+foreach ($extraFile in $extraFiles) {
+  if (Test-Path $extraFile) {
+    Copy-Item $extraFile -Destination $bundlePath -Force
+  }
+}
+
+if (Test-Path "neolink.toml") {
+  Copy-Item "neolink.toml" -Destination $bundlePath -Force
 }
 
 $zipName = ("{0}_windows_{1}.zip" -f $AppName, (Get-Date -Format "yyyyMMdd_HHmmss"))
 $zipPath = Join-Path $distDir $zipName
 
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-Compress-Archive -Path $exePath -DestinationPath $zipPath
+Compress-Archive -Path $bundlePath -DestinationPath $zipPath
 
-Write-Host "EXE: $exePath"
+Write-Host "BUNDLE: $bundlePath"
 Write-Host "ZIP: $zipPath"

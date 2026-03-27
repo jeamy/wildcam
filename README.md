@@ -77,6 +77,12 @@ This will:
 - Start Neolink via Docker
 - Start WildCam
 
+Important:
+
+- WildCam manages the Neolink configuration, but it does **not** embed the actual `neolink` runtime.
+- For Reolink WLAN / battery cameras you still need a running Neolink instance, typically via `docker compose up -d`.
+- For regular RTSP cameras on port 554, Neolink is not required.
+
 ## Configuration File (`camera_config.json`)
 
 This app stores your local setup in `camera_config.json`.
@@ -170,6 +176,11 @@ When you add found Reolink WLAN/battery cameras, WildCam will automatically:
 
 Neolink is a **proxy** and does not magically discover/wake sleeping cameras. The camera still needs to be reachable (awake) for discovery and for Neolink to connect.
 
+Important:
+
+- WildCam writes and updates `neolink.toml`, but the actual Neolink proxy must run separately.
+- The recommended setup in this repository is the Docker Compose stack from `docker-compose.yml`.
+
 ## Battery Cameras
 
 ### Automatic Neolink Setup ⭐
@@ -211,6 +222,12 @@ docker logs wildcam-neolink
 # 4. Start WildCam
 python3 main.py
 ```
+
+If you distribute WildCam as a standalone build:
+
+- the bundle can include `docker-compose.yml`, `neolink_manager.py`, `neolink.toml` (if present), and the app itself
+- but it still does **not** include the external Neolink container/image
+- users who rely on Reolink battery / Baichuan cameras still need Docker/Compose or a separately installed `neolink`
 
 #### How it Works
 
@@ -258,6 +275,13 @@ docker compose down
 ## Build (Standalone Binaries)
 
 The repository contains helper scripts using PyInstaller.
+
+Note about Neolink:
+
+- The packaged app bundles WildCam and helper files such as `docker-compose.yml` and `neolink_manager.py`.
+- The actual Neolink runtime is **not** bundled into the app archive.
+- If you use only normal RTSP cameras, the standalone app is enough.
+- If you use Reolink WLAN / battery cameras, you must additionally run Neolink externally.
 
 ### Linux
 

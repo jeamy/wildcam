@@ -4,7 +4,7 @@ set -euo pipefail
 PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 APP_NAME="${APP_NAME:-wildcam}"
 ENTRY_POINT="${ENTRY_POINT:-main.py}"
-PLATFORM="${PLATFORM:-linux}"
+PLATFORM="${PLATFORM:-macos}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -64,20 +64,26 @@ rm -rf "$DIST_DIR" "$BUILD_DIR"
   --collect-all "numpy" \
   "$ENTRY_POINT"
 
-BUNDLE_PATH="$DIST_DIR/$APP_NAME"
-if [[ ! -d "$BUNDLE_PATH" ]]; then
-  echo "Build failed: bundle not found at $BUNDLE_PATH" >&2
+BUNDLE_PATH="$DIST_DIR/${APP_NAME}.app"
+if [[ ! -e "$BUNDLE_PATH" ]]; then
+  BUNDLE_PATH="$DIST_DIR/$APP_NAME"
+fi
+
+if [[ ! -e "$BUNDLE_PATH" ]]; then
+  echo "Build failed: bundle not found under $DIST_DIR" >&2
   exit 1
 fi
 
-for extra_file in README.md docker-compose.yml neolink_manager.py camera_config.json.example; do
-  if [[ -f "$extra_file" ]]; then
-    cp "$extra_file" "$BUNDLE_PATH/"
-  fi
-done
+if [[ -d "$BUNDLE_PATH" ]]; then
+  for extra_file in README.md docker-compose.yml neolink_manager.py camera_config.json.example; do
+    if [[ -f "$extra_file" ]]; then
+      cp "$extra_file" "$BUNDLE_PATH/"
+    fi
+  done
 
-if [[ -f "neolink.toml" ]]; then
-  cp "neolink.toml" "$BUNDLE_PATH/"
+  if [[ -f "neolink.toml" ]]; then
+    cp "neolink.toml" "$BUNDLE_PATH/"
+  fi
 fi
 
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -92,13 +98,17 @@ import zipfile
 
 bundle_path = os.environ.get("BUNDLE_PATH")
 zip_path = os.environ.get("ZIP_PATH")
+parent_dir = os.path.dirname(bundle_path)
 
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-    for root, _, files in os.walk(bundle_path):
-        for file_name in files:
-            full_path = os.path.join(root, file_name)
-            arcname = os.path.relpath(full_path, os.path.dirname(bundle_path))
-            z.write(full_path, arcname=arcname)
+    if os.path.isdir(bundle_path):
+        for root, _, files in os.walk(bundle_path):
+            for file_name in files:
+                full_path = os.path.join(root, file_name)
+                arcname = os.path.relpath(full_path, parent_dir)
+                z.write(full_path, arcname=arcname)
+    else:
+        z.write(bundle_path, arcname=os.path.relpath(bundle_path, parent_dir))
 
 print(f"BUNDLE: {bundle_path}")
 print(f"ZIP: {zip_path}")

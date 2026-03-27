@@ -16,8 +16,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QProgressBar, QDialog, QDialogButtonBox, QTableWidget,
                              QTableWidgetItem, QHeaderView, QSizePolicy, QSplitter,
                              QTabWidget, QStyle)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize, QEvent
-from PyQt6.QtGui import QImage, QPixmap, QDrag, QIcon
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize, QEvent, QRect
+from PyQt6.QtGui import QImage, QPixmap, QDrag, QIcon, QPainter, QPen, QColor
 from datetime import datetime
 import json
 import socket
@@ -32,7 +32,10 @@ import time
 try:
     import sip  # type: ignore
 except Exception:  # pragma: no cover
-    sip = None
+    try:
+        from PyQt6 import sip  # type: ignore
+    except Exception:  # pragma: no cover
+        sip = None
 
 
 CURRENT_LANG = "de"
@@ -1811,10 +1814,39 @@ class CameraWidget(QWidget):
 class PreviewLabel(QLabel):
     clicked = pyqtSignal(int)
     double_clicked = pyqtSignal(int)
+    region_selected = pyqtSignal(int, QRect)
 
     def __init__(self, camera_id=None, parent=None):
         super().__init__(parent)
         self.camera_id = camera_id
+        self._selection_enabled = False
+        self._selection_origin = None
+        self._selection_rect = QRect()
+        self._frame_display_rect = QRect()
+
+    def set_selection_enabled(self, enabled: bool):
+        self._selection_enabled = bool(enabled)
+        self.setCursor(
+            Qt.CursorShape.CrossCursor if self._selection_enabled else Qt.CursorShape.ArrowCursor
+        )
+        if not self._selection_enabled:
+            self.clear_selection()
+
+    def clear_selection(self):
+        if not self._selection_rect.isNull():
+            self._selection_rect = QRect()
+            self.update()
+        self._selection_origin = None
+
+    def set_frame_display_rect(self, rect: QRect):
+        self._frame_display_rect = QRect(rect)
+
+    def clear_frame_display_rect(self):
+        self._frame_display_rect = QRect()
+        self.clear_selection()
+
+    def frame_display_rect(self) -> QRect:
+        return QRect(self._frame_display_rect)
 
     def sizeHint(self):
         return QSize(0, 0)
@@ -1823,14 +1855,58 @@ class PreviewLabel(QLabel):
         return QSize(0, 0)
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.camera_id is not None:
-            self.clicked.emit(int(self.camera_id))
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.camera_id is not None
+            and self._selection_enabled
+        ):
+            pos = event.position().toPoint()
+            if self._frame_display_rect.contains(pos):
+                self._selection_origin = pos
+                self._selection_rect = QRect(pos, pos)
+                self.update()
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._selection_enabled and self._selection_origin is not None:
+            pos = event.position().toPoint()
+            self._selection_rect = QRect(self._selection_origin, pos).normalized()
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._selection_origin is not None:
+            selection_rect = QRect(self._selection_origin, event.position().toPoint()).normalized()
+            selection_rect = selection_rect.intersected(self._frame_display_rect)
+            self.clear_selection()
+            if (
+                self.camera_id is not None
+                and selection_rect.width() >= 8
+                and selection_rect.height() >= 8
+            ):
+                self.region_selected.emit(int(self.camera_id), selection_rect)
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and self.camera_id is not None:
+            self.clear_selection()
             self.double_clicked.emit(int(self.camera_id))
         super().mouseDoubleClickEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if self._selection_rect.isNull():
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setPen(QPen(QColor(76, 175, 80), 2))
+        painter.fillRect(self._selection_rect, QColor(76, 175, 80, 45))
+        painter.drawRect(self._selection_rect)
 
 
 class MainWindow(QMainWindow):
@@ -1853,6 +1929,8 @@ class MainWindow(QMainWindow):
         self.selected_camera_ids = []  # Multi-Kamera-Auswahl
         self.multi_view_labels = {}  # Labels für Multi-Kamera-Ansicht
         self.zoomed_camera_id = None
+        self.preview_crop_camera_id = None
+        self.preview_crop_rect = None
         self._rebuilding_camera_list = False
         self._pending_order_apply = False
         self._closing = False
@@ -2037,6 +2115,7 @@ class MainWindow(QMainWindow):
         self.big_preview_label.setStyleSheet("border: 2px solid #555; background-color: black;")
         self.big_preview_label.setMinimumHeight(360)
         self.big_preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+        self._connect_preview_label(self.big_preview_label)
         self.big_preview_layout.addWidget(self.big_preview_label)
 
         splitter.addWidget(self.big_preview_container)
@@ -2064,6 +2143,127 @@ class MainWindow(QMainWindow):
             return bool(sip.isdeleted(obj))
         except Exception:
             return False
+
+    def _connect_preview_label(self, label: PreviewLabel):
+        label.double_clicked.connect(self._on_big_preview_label_double_clicked)
+        label.region_selected.connect(self._on_big_preview_region_selected)
+
+    def _get_active_big_preview_camera_id(self):
+        if self.selected_camera_ids:
+            if self.zoomed_camera_id is not None and self.zoomed_camera_id in self.selected_camera_ids:
+                return self.zoomed_camera_id
+            if len(self.selected_camera_ids) == 1:
+                return self.selected_camera_ids[0]
+            return None
+        return self.selected_camera_id
+
+    def _get_preview_label_for_camera(self, camera_id):
+        if camera_id is None:
+            return None
+
+        label = getattr(self, "big_preview_label", None)
+        if label is not None and not self._is_qobject_deleted(label):
+            try:
+                if getattr(label, "camera_id", None) == camera_id:
+                    return label
+            except RuntimeError:
+                pass
+
+        label = self.multi_view_labels.get(camera_id)
+        if label is not None and not self._is_qobject_deleted(label):
+            return label
+        return None
+
+    def _clear_big_preview_crop(self):
+        self.preview_crop_camera_id = None
+        self.preview_crop_rect = None
+
+    def _sync_big_preview_crop_state(self, active_camera_id):
+        if active_camera_id is None or self.preview_crop_camera_id != active_camera_id:
+            self._clear_big_preview_crop()
+
+    def _update_big_preview_selection_state(self):
+        active_camera_id = self._get_active_big_preview_camera_id()
+        known_labels = []
+        label = getattr(self, "big_preview_label", None)
+        if label is not None and not self._is_qobject_deleted(label):
+            known_labels.append(label)
+        for multi_label in self.multi_view_labels.values():
+            if multi_label is not None and not self._is_qobject_deleted(multi_label):
+                known_labels.append(multi_label)
+        for known_label in known_labels:
+            try:
+                known_label.set_selection_enabled(False)
+            except RuntimeError:
+                continue
+
+        label = self._get_preview_label_for_camera(active_camera_id)
+        if label is not None:
+            try:
+                label.set_selection_enabled(
+                    self.preview_crop_rect is None and self.preview_crop_camera_id is None
+                )
+            except RuntimeError:
+                pass
+
+    def _refresh_big_preview_from_last_frame(self, camera_id):
+        widget = self.camera_widgets.get(camera_id)
+        if widget is None or widget.last_frame is None:
+            return
+
+        if self.selected_camera_ids:
+            self._update_multi_view_frame(widget.last_frame, camera_id)
+        elif self.selected_camera_id == camera_id:
+            self._update_big_preview_frame(widget.last_frame)
+
+    def _render_frame_to_label(self, label, frame, crop_rect=None):
+        if label is None or self._is_qobject_deleted(label):
+            return
+
+        display_w = max(1, label.width())
+        display_h = max(1, label.height())
+
+        src_h, src_w = frame.shape[:2]
+        if src_w <= 0 or src_h <= 0:
+            label.clear_frame_display_rect()
+            return
+
+        crop_x = 0
+        crop_y = 0
+        crop_w = src_w
+        crop_h = src_h
+
+        if crop_rect is not None:
+            crop_x = max(0, min(src_w - 1, crop_rect.x()))
+            crop_y = max(0, min(src_h - 1, crop_rect.y()))
+            max_crop_w = max(1, src_w - crop_x)
+            max_crop_h = max(1, src_h - crop_y)
+            crop_w = max(1, min(max_crop_w, crop_rect.width()))
+            crop_h = max(1, min(max_crop_h, crop_rect.height()))
+
+        frame_view = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
+        if frame_view.size == 0:
+            label.clear_frame_display_rect()
+            return
+
+        scale = min(display_w / crop_w, display_h / crop_h)
+        new_w = max(1, int(crop_w * scale))
+        new_h = max(1, int(crop_h * scale))
+
+        frame_resized = cv2.resize(frame_view, (new_w, new_h))
+        rgb_small = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+        rgb_frame = np.zeros((display_h, display_w, 3), dtype=np.uint8)
+        x = (display_w - new_w) // 2
+        y = (display_h - new_h) // 2
+        rgb_frame[y:y + new_h, x:x + new_w] = rgb_small
+
+        h, w, ch = rgb_frame.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+        pixmap = QPixmap.fromImage(qt_image)
+        pixmap.setDevicePixelRatio(1.0)
+        label.setPixmap(pixmap)
+        label.set_frame_display_rect(QRect(x, y, new_w, new_h))
 
     def _get_or_create_camera_widget(self, camera: dict) -> CameraWidget:
         camera_id = int(camera.get('id'))
@@ -2366,6 +2566,9 @@ class MainWindow(QMainWindow):
             self.camera_threads[camera_id].stop()
             del self.camera_threads[camera_id]
 
+        if self.preview_crop_camera_id == camera_id:
+            self._clear_big_preview_crop()
+
         if camera_id in self.camera_widgets:
             widget = self.camera_widgets[camera_id]
             if widget.record_btn.isChecked():
@@ -2376,6 +2579,7 @@ class MainWindow(QMainWindow):
 
         if self.selected_camera_id == camera_id:
             self.big_preview_label.setPixmap(QPixmap())
+            self.big_preview_label.clear_frame_display_rect()
             widget = self.camera_widgets.get(camera_id)
             if widget:
                 self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.click_to_start')}")
@@ -2420,8 +2624,18 @@ class MainWindow(QMainWindow):
 
         if self.selected_camera_id == camera_id:
             self.selected_camera_id = None
+            if self.preview_crop_camera_id == camera_id:
+                self._clear_big_preview_crop()
             self.big_preview_label.setPixmap(QPixmap())
+            self.big_preview_label.clear_frame_display_rect()
             self.big_preview_label.setText(tr("big.select_camera"))
+
+        if camera_id in self.selected_camera_ids:
+            self.selected_camera_ids.remove(camera_id)
+            if self.zoomed_camera_id == camera_id:
+                self.zoomed_camera_id = None
+            self._sync_big_preview_crop_state(self._get_active_big_preview_camera_id())
+            self._rebuild_multi_view_layout()
         
         # Aus Liste entfernen
         self.cameras = [c for c in self.cameras if c['id'] != camera_id]
@@ -2474,7 +2688,11 @@ class MainWindow(QMainWindow):
             self.cameras.clear()
             self.next_camera_id = 1
             self.selected_camera_id = None
+            self.selected_camera_ids = []
+            self.zoomed_camera_id = None
+            self._clear_big_preview_crop()
             self.big_preview_label.setPixmap(QPixmap())
+            self.big_preview_label.clear_frame_display_rect()
             self.big_preview_label.setText(tr("big.select_camera"))
             if hasattr(self, "camera_list_container"):
                 layout = self.camera_list_container.layout_ref
@@ -2522,6 +2740,7 @@ class MainWindow(QMainWindow):
         for thread in list(self.camera_threads.values()):
             thread.stop()
         self.camera_threads.clear()
+        self._clear_big_preview_crop()
 
         for camera_id, widget in list(self.camera_widgets.items()):
             try:
@@ -2538,7 +2757,9 @@ class MainWindow(QMainWindow):
             widget = self.camera_widgets.get(self.selected_camera_id)
             if widget:
                 self.big_preview_label.setPixmap(QPixmap())
+                self.big_preview_label.clear_frame_display_rect()
                 self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.click_to_start')}")
+        self._update_big_preview_selection_state()
 
         self.update_status_display()
         self.statusBar().showMessage(tr("status.streams_stopped"))
@@ -2793,6 +3014,7 @@ class MainWindow(QMainWindow):
             return
         
         self.selected_camera_id = camera_id
+        self._sync_big_preview_crop_state(camera_id)
 
         for cid, widget in self.camera_widgets.items():
             if cid == camera_id:
@@ -2803,6 +3025,7 @@ class MainWindow(QMainWindow):
         widget = self.camera_widgets.get(camera_id)
         if widget and hasattr(self, 'big_preview_label') and self.big_preview_label is not None:
             try:
+                self.big_preview_label.clear_frame_display_rect()
                 if camera_id in self.camera_threads and self.camera_threads[camera_id].isRunning():
                     self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.waiting')}")
                 else:
@@ -2813,6 +3036,8 @@ class MainWindow(QMainWindow):
 
         if camera_id not in self.camera_threads or not self.camera_threads[camera_id].isRunning():
             self.start_single_stream(camera_id)
+        else:
+            self._refresh_big_preview_from_last_frame(camera_id)
 
     def _on_language_changed(self):
         if not hasattr(self, "language_combo"):
@@ -2916,6 +3141,8 @@ class MainWindow(QMainWindow):
 
         if self.zoomed_camera_id is not None and self.zoomed_camera_id not in self.selected_camera_ids:
             self.zoomed_camera_id = None
+
+        self._sync_big_preview_crop_state(self._get_active_big_preview_camera_id())
         
         self._rebuild_multi_view_layout()
         
@@ -2942,6 +3169,8 @@ class MainWindow(QMainWindow):
         if self.zoomed_camera_id is not None and self.zoomed_camera_id in selected_ids:
             selected_ids = [self.zoomed_camera_id]
 
+        self._sync_big_preview_crop_state(selected_ids[0] if len(selected_ids) == 1 else None)
+
         num_selected = len(selected_ids)
         
         if num_selected == 0:
@@ -2952,6 +3181,7 @@ class MainWindow(QMainWindow):
             label.setStyleSheet("border: 2px solid #555; background-color: black;")
             label.setMinimumHeight(360)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            self._connect_preview_label(label)
             self.big_preview_layout.addWidget(label)
             self.big_preview_label = label
         elif num_selected == 1:
@@ -2962,11 +3192,10 @@ class MainWindow(QMainWindow):
             label.setStyleSheet("border: 2px solid #555; background-color: black;")
             label.setMinimumHeight(360)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+            self._connect_preview_label(label)
             self.big_preview_layout.addWidget(label)
             self.big_preview_label = label
             self.multi_view_labels[camera_id] = label
-
-            label.double_clicked.connect(self._on_multi_view_label_double_clicked)
 
             close_btn = QPushButton()
             close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
@@ -3033,8 +3262,7 @@ class MainWindow(QMainWindow):
                     label.setMinimumWidth(0)
                     label.setMaximumWidth(16777215)  # Qt max
                     label.setScaledContents(False)
-
-                    label.double_clicked.connect(self._on_multi_view_label_double_clicked)
+                    self._connect_preview_label(label)
                     
                     widget = self.camera_widgets.get(camera_id)
                     if widget:
@@ -3074,9 +3302,18 @@ class MainWindow(QMainWindow):
                     container_layout.addWidget(label)
                     row_layout.addWidget(container, 1)
                     self.multi_view_labels[camera_id] = label
+                    if self.big_preview_label is None or self._is_qobject_deleted(self.big_preview_label):
+                        self.big_preview_label = label
                 
                 # Set equal stretch for all rows
                 self.big_preview_layout.addLayout(row_layout, 1)
+
+        self._update_big_preview_selection_state()
+
+        for camera_id in selected_ids:
+            widget = self.camera_widgets.get(camera_id)
+            if widget is not None and widget.last_frame is not None:
+                self._update_multi_view_frame(widget.last_frame, camera_id)
     
     def eventFilter(self, obj, event):
         """Event filter to reposition close buttons on label resize"""
@@ -3099,6 +3336,8 @@ class MainWindow(QMainWindow):
 
         if self.zoomed_camera_id == camera_id:
             self.zoomed_camera_id = None
+
+        self._sync_big_preview_crop_state(self._get_active_big_preview_camera_id())
         
         # Uncheck the checkbox in the camera widget
         widget = self.camera_widgets.get(camera_id)
@@ -3114,18 +3353,70 @@ class MainWindow(QMainWindow):
         # Rebuild the multi-view layout
         self._rebuild_multi_view_layout()
 
-    def _on_multi_view_label_double_clicked(self, camera_id):
+    def _on_big_preview_label_double_clicked(self, camera_id):
         if self.zoomed_camera_id is None:
-            if len(self.selected_camera_ids) <= 1:
-                return
-            if camera_id not in self.selected_camera_ids:
-                return
-            self.zoomed_camera_id = camera_id
-            self._rebuild_multi_view_layout()
+            if len(self.selected_camera_ids) > 1 and camera_id in self.selected_camera_ids:
+                self.zoomed_camera_id = camera_id
+                self._rebuild_multi_view_layout()
             return
 
-        self.zoomed_camera_id = None
-        self._rebuild_multi_view_layout()
+        active_camera_id = self._get_active_big_preview_camera_id()
+        if active_camera_id is None or camera_id != active_camera_id:
+            return
+
+        if self.preview_crop_camera_id == camera_id and self.preview_crop_rect is not None:
+            self._clear_big_preview_crop()
+            self._update_big_preview_selection_state()
+            self._refresh_big_preview_from_last_frame(camera_id)
+            return
+
+        if self.zoomed_camera_id is not None:
+            self.zoomed_camera_id = None
+            self._rebuild_multi_view_layout()
+
+    def _on_big_preview_region_selected(self, camera_id, selection_rect):
+        active_camera_id = self._get_active_big_preview_camera_id()
+        if active_camera_id is None or camera_id != active_camera_id:
+            return
+        if self.preview_crop_rect is not None:
+            return
+
+        label = self._get_preview_label_for_camera(camera_id)
+        widget = self.camera_widgets.get(camera_id)
+        if label is None or widget is None or widget.last_frame is None:
+            return
+
+        frame_rect = label.frame_display_rect()
+        if frame_rect.isNull():
+            return
+
+        selection_rect = selection_rect.intersected(frame_rect)
+        if selection_rect.width() < 8 or selection_rect.height() < 8:
+            return
+
+        frame_h, frame_w = widget.last_frame.shape[:2]
+        rel_x = (selection_rect.x() - frame_rect.x()) / frame_rect.width()
+        rel_y = (selection_rect.y() - frame_rect.y()) / frame_rect.height()
+        rel_w = selection_rect.width() / frame_rect.width()
+        rel_h = selection_rect.height() / frame_rect.height()
+
+        crop_x = int(round(rel_x * frame_w))
+        crop_y = int(round(rel_y * frame_h))
+        crop_w = int(round(rel_w * frame_w))
+        crop_h = int(round(rel_h * frame_h))
+
+        crop_x = max(0, min(frame_w - 1, crop_x))
+        crop_y = max(0, min(frame_h - 1, crop_y))
+        crop_w = max(24, min(frame_w - crop_x, crop_w))
+        crop_h = max(24, min(frame_h - crop_y, crop_h))
+
+        if crop_w <= 0 or crop_h <= 0:
+            return
+
+        self.preview_crop_camera_id = camera_id
+        self.preview_crop_rect = QRect(crop_x, crop_y, crop_w, crop_h)
+        self._update_big_preview_selection_state()
+        self._refresh_big_preview_from_last_frame(camera_id)
     
     def _clear_layout(self, layout):
         """Recursively clear a layout"""
@@ -3137,73 +3428,40 @@ class MainWindow(QMainWindow):
                 self._clear_layout(item.layout())
 
     def _update_big_preview_frame(self, frame):
-        display_w = max(1, self.big_preview_label.width())
-        display_h = max(1, self.big_preview_label.height())
-
-        src_h, src_w = frame.shape[:2]
-        if src_w <= 0 or src_h <= 0:
+        label = getattr(self, "big_preview_label", None)
+        if label is None or self._is_qobject_deleted(label):
             return
 
-        scale = min(display_w / src_w, display_h / src_h)
-        new_w = max(1, int(src_w * scale))
-        new_h = max(1, int(src_h * scale))
+        crop_rect = None
+        active_camera_id = self._get_active_big_preview_camera_id()
+        if (
+            active_camera_id is not None
+            and self.preview_crop_camera_id == active_camera_id
+            and self.preview_crop_rect is not None
+        ):
+            crop_rect = self.preview_crop_rect
 
-        frame_resized = cv2.resize(frame, (new_w, new_h))
-        rgb_small = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-        rgb_frame = np.zeros((display_h, display_w, 3), dtype=np.uint8)
-        x = (display_w - new_w) // 2
-        y = (display_h - new_h) // 2
-        rgb_frame[y:y + new_h, x:x + new_w] = rgb_small
-
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(qt_image)
-        pixmap.setDevicePixelRatio(1.0)
-        self.big_preview_label.setPixmap(pixmap)
+        self._render_frame_to_label(label, frame, crop_rect=crop_rect)
+        self._update_big_preview_selection_state()
     
     def _update_multi_view_frame(self, frame, camera_id):
         """Update frame in multi-camera view with aspect ratio preservation"""
         label = self.multi_view_labels.get(camera_id)
         if not label:
             return
-        
-        # Get current label size and lock it
-        display_w = label.width()
-        display_h = label.height()
-        
-        if display_w <= 10 or display_h <= 10:
-            return
-        
-        src_h, src_w = frame.shape[:2]
-        if src_w <= 0 or src_h <= 0:
-            return
-        
-        # Calculate scale to fit within label while preserving aspect ratio
-        scale = min(display_w / src_w, display_h / src_h)
-        new_w = max(1, int(src_w * scale))
-        new_h = max(1, int(src_h * scale))
-        
-        # Resize frame
-        frame_resized = cv2.resize(frame, (new_w, new_h))
-        rgb_small = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-        
-        # Create black background with exact label size
-        rgb_frame = np.zeros((display_h, display_w, 3), dtype=np.uint8)
-        
-        # Center the resized frame
-        x = (display_w - new_w) // 2
-        y = (display_h - new_h) // 2
-        rgb_frame[y:y + new_h, x:x + new_w] = rgb_small
-        
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-        
-        # Create QImage with explicit copy to avoid reference issues
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(qt_image)
-        pixmap.setDevicePixelRatio(1.0)
-        label.setPixmap(pixmap)
+
+        crop_rect = None
+        if self.zoomed_camera_id == camera_id and self.preview_crop_rect is not None:
+            if self.preview_crop_camera_id == camera_id:
+                crop_rect = self.preview_crop_rect
+
+        self._render_frame_to_label(label, frame, crop_rect=crop_rect)
+        label.set_selection_enabled(
+            camera_id == self._get_active_big_preview_camera_id()
+            and len(self.multi_view_labels) == 1
+            and self.preview_crop_rect is None
+            and self.preview_crop_camera_id is None
+        )
 
 
 def main():
