@@ -1,7 +1,8 @@
 param(
   [string]$PythonExe = "py",
   [string]$AppName = "wildcam",
-  [string]$EntryPoint = "main.py"
+  [string]$EntryPoint = "main.py",
+  [string]$ArtifactSuffix = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -69,7 +70,11 @@ if (Test-Path "neolink.toml") {
   Copy-Item "neolink.toml" -Destination $bundlePath -Force
 }
 
-$zipName = ("{0}_windows_{1}.zip" -f $AppName, (Get-Date -Format "yyyyMMdd_HHmmss"))
+if ([string]::IsNullOrWhiteSpace($ArtifactSuffix)) {
+  $ArtifactSuffix = Get-Date -Format "yyyyMMdd_HHmmss"
+}
+
+$zipName = ("{0}_windows_{1}.zip" -f $AppName, $ArtifactSuffix)
 $zipPath = Join-Path $distDir $zipName
 
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }

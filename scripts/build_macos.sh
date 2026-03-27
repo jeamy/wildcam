@@ -5,6 +5,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3.12}"
 APP_NAME="${APP_NAME:-wildcam}"
 ENTRY_POINT="${ENTRY_POINT:-main.py}"
 PLATFORM="${PLATFORM:-macos}"
+ARTIFACT_SUFFIX="${ARTIFACT_SUFFIX:-$(date +%Y%m%d_%H%M%S)}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -86,8 +87,7 @@ if [[ -d "$BUNDLE_PATH" ]]; then
   fi
 fi
 
-TS="$(date +%Y%m%d_%H%M%S)"
-ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.zip"
+ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${ARTIFACT_SUFFIX}.zip"
 
 export BUNDLE_PATH
 export ZIP_PATH

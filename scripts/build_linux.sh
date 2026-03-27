@@ -6,6 +6,7 @@ APP_NAME="${APP_NAME:-wildcam}"
 ENTRY_POINT="${ENTRY_POINT:-main.py}"
 PLATFORM="${PLATFORM:-linux}"
 APP_VERSION="${APP_VERSION:-dev}"
+ARTIFACT_SUFFIX="${ARTIFACT_SUFFIX:-$(date +%Y%m%d_%H%M%S)}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -81,8 +82,6 @@ if [[ -f "neolink.toml" ]]; then
   cp "neolink.toml" "$BUNDLE_PATH/"
 fi
 
-TS="$(date +%Y%m%d_%H%M%S)"
-
 APPDIR_PATH="$BUILD_DIR/${APP_NAME}.AppDir"
 APPDIR_USR_BIN="$APPDIR_PATH/usr/bin"
 APPDIR_USR_LIB="$APPDIR_PATH/usr/lib/$APP_NAME"
@@ -147,7 +146,7 @@ if [[ ! -f "$APPIMAGE_TOOL" ]]; then
   chmod +x "$APPIMAGE_TOOL"
 fi
 
-APPIMAGE_FINAL="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.AppImage"
+APPIMAGE_FINAL="$DIST_DIR/${APP_NAME}_${PLATFORM}_${ARTIFACT_SUFFIX}.AppImage"
 cp "$DESKTOP_FILE" "$APPDIR_PATH/${APP_NAME}.desktop"
 cp "$ICON_PATH" "$APPDIR_PATH/${APP_NAME}.png"
 
@@ -163,7 +162,7 @@ if [[ ! -f "$APPIMAGE_FINAL" ]]; then
   exit 1
 fi
 
-ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${TS}.zip"
+ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${ARTIFACT_SUFFIX}.zip"
 
 export BUNDLE_PATH
 export ZIP_PATH
