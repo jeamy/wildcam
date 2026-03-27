@@ -6,10 +6,12 @@ on:
     branches:
       - main
       - master
+    tags:
+      - "v*"
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -78,3 +80,10 @@ jobs:
           name: wildcam-${{ matrix.platform }}
           path: dist/*_${{ matrix.platform }}_*.zip
           if-no-files-found: error
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*_${{ matrix.platform }}_*.zip
+          generate_release_notes: true
