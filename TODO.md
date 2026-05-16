@@ -1,11 +1,12 @@
 # TODO
 
-## Neolink integration (Reolink WLAN/Baichuan)
+## ReolinkProxy integration (Reolink WLAN/Baichuan)
 
 - [x] Auto-switch Port 9000 / battery cameras to `rtsp://localhost:8554/<NAME>/mainStream`
-- [x] Auto-update/extend `neolink.toml` when adding/editing/discovering cameras
+- [x] Store proxy settings in `camera_config.json`
+- [x] Auto-generate `reolinkproxy.env` from `camera_config.json`
 - [x] Handle `#` in passwords (URL parsing)
-- [x] Use `docker compose` (v2) for starting/stopping Neolink
+- [x] Use `docker compose` (v2) for starting/stopping ReolinkProxy
 
 ## Refactor `main.py` into modules (best practice)
 

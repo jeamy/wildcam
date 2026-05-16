@@ -1,6 +1,6 @@
 camera_config.json
 camera_config.json.backup
-neolink.toml
+reolinkproxy.env
 
 __pycache__/
 *.py[cod]
@@ -19,5 +19,7 @@ dist/
 
 .idea/
 .vscode/
+.codex
+.windsurf
 
 .DS_Store

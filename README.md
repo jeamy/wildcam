@@ -47,23 +47,24 @@ WildCam supports two ways to connect Reolink cameras:
 
 - **Native RTSP (port 554)**
   - Works well for mains-powered cameras.
-- **Neolink proxy (recommended for Reolink WLAN / battery cameras)**
+- **ReolinkProxy (recommended for Reolink WLAN / battery cameras)**
   - Many Reolink WLAN/battery models use the **Baichuan protocol (port 9000)**.
   - WildCam will automatically:
-    - add/update `neolink.toml`
+    - add/update `reolinkproxy.env`
     - switch the stored RTSP URL to `rtsp://localhost:8554/<NAME>/mainStream`
-    - so the app uses the Neolink-proxied stream
+    - so the app uses the ReolinkProxy-proxied stream
 
 #### What gets stored where
 
 - **`camera_config.json`**
   - What the app actually uses at runtime.
-  - After Neolink conversion, URLs look like:
+  - After ReolinkProxy conversion, URLs look like:
     - `rtsp://localhost:8554/D58/mainStream`
-- **`neolink.toml`**
+- **`reolinkproxy.env`**
   - Contains the real camera IP/credentials for port 9000 cameras.
   - Example:
-    - `address = "192.168.8.58:9000"`
+    - `REOLINK_CAMERA_0_HOST="192.168.8.58"`
+    - `REOLINK_CAMERA_0_RTSP_PATH="D58/mainStream"`
 
 #### Quick start (recommended)
 
@@ -73,15 +74,15 @@ WildCam supports two ways to connect Reolink cameras:
 
 This will:
 
-- Generate/extend `neolink.toml` based on `camera_config.json`
-- Start Neolink via Docker
+- Generate/extend `reolinkproxy.env` based on `camera_config.json`
+- Start ReolinkProxy via Docker
 - Start WildCam
 
 Important:
 
-- WildCam manages the Neolink configuration, but it does **not** embed the actual `neolink` runtime.
-- For Reolink WLAN / battery cameras you still need a running Neolink instance, typically via `docker compose up -d`.
-- For regular RTSP cameras on port 554, Neolink is not required.
+- WildCam manages the ReolinkProxy configuration, but it does **not** embed the actual `reolinkproxy` runtime.
+- For Reolink WLAN / battery cameras you still need a running ReolinkProxy instance, typically via `docker compose up -d`.
+- For regular RTSP cameras on port 554, ReolinkProxy is not required.
 
 ## Configuration File (`camera_config.json`)
 
@@ -96,6 +97,7 @@ You usually **do not need to create this file manually**:
 Manual editing is optional (e.g. to bulk-edit RTSP URLs or names).
 
 - The file is **gitignored** because it can contain **credentials** inside RTSP URLs.
+- `reolinkproxy.env` is generated from this file and should not be edited as the primary configuration.
 - Use `camera_config.json.example` as a safe template and create your local config from it.
 
 ### Create your local config
@@ -113,6 +115,7 @@ Then edit `camera_config.json` and replace IPs / usernames / passwords.
   - **`id`** must be unique.
   - **`url`** is the RTSP URL.
   - **`name`** is the display name.
+  - **`proxy`** is optional and contains ReolinkProxy connection settings for battery/WLAN cameras.
 - **`recording_path`**
   - Target directory for recordings.
 - **`next_camera_id`**
@@ -130,8 +133,21 @@ Example snippet:
   "cameras": [
     {
       "id": 1,
-      "url": "rtsp://USER:PASS@192.168.1.100:554/h264Preview_01_main",
-      "name": "Camera 1"
+      "url": "rtsp://localhost:8554/D54/mainStream",
+      "name": "D54",
+      "uid": "9527000000000000",
+      "proxy": {
+        "type": "reolinkproxy",
+        "host": "192.168.1.100",
+        "port": 9000,
+        "username": "admin",
+        "password": "password",
+        "stream": "main",
+        "battery": true,
+        "pause_on_client": true,
+        "idle_disconnect": true,
+        "idle_timeout": "30s"
+      }
     }
   ],
   "recording_path": "/home/USER/Videos/Reolink",
@@ -161,7 +177,7 @@ rtsp://admin:password@192.168.1.100:9000/h264Preview_01_main
 
 WildCam will automatically:
 
-- append/update the camera entry in `neolink.toml`
+- append/update the camera entry in `reolinkproxy.env`
 - store the camera in `camera_config.json` as:
   - `rtsp://localhost:8554/<NAME>/mainStream`
 
@@ -171,38 +187,38 @@ Open **Auto-Discover**, choose your network (e.g. `192.168.1.0/24`), enter crede
 
 When you add found Reolink WLAN/battery cameras, WildCam will automatically:
 
-- update `neolink.toml`
+- update `reolinkproxy.env`
 - store `localhost:8554/...` URLs in `camera_config.json`
 
-Neolink is a **proxy** and does not magically discover/wake sleeping cameras. The camera still needs to be reachable (awake) for discovery and for Neolink to connect.
+ReolinkProxy is a **proxy** and does not magically discover/wake sleeping cameras. The camera still needs to be reachable (awake) for discovery and for ReolinkProxy to connect.
 
 Important:
 
-- WildCam writes and updates `neolink.toml`, but the actual Neolink proxy must run separately.
+- WildCam writes and updates `reolinkproxy.env`, but the actual ReolinkProxy must run separately.
 - The recommended setup in this repository is the Docker Compose stack from `docker-compose.yml`.
 
 ## Battery Cameras
 
-### Automatic Neolink Setup ⭐
+### Automatic ReolinkProxy Setup
 
-WildCam includes automatic Neolink setup for battery cameras using port 9000 (Baichuan protocol).
+WildCam includes automatic ReolinkProxy setup for battery cameras using port 9000 (Baichuan protocol).
 
 This is handled in two places:
 
-- The **GUI** automatically switches Reolink WLAN/Baichuan cameras to `rtsp://localhost:8554/...` and appends the camera to `neolink.toml`.
-- The **startup script** can start the Neolink container for you.
+- The **GUI** automatically switches Reolink WLAN/Baichuan cameras to `rtsp://localhost:8554/...` and appends the camera to `reolinkproxy.env`.
+- The **startup script** can start the ReolinkProxy container for you.
 
 #### Quick Start
 
 ```bash
-# 1. Start WildCam with automatic Neolink setup
+# 1. Start WildCam with automatic ReolinkProxy setup
 ./start_wildcam.sh
 ```
 
 **What it does:**
 - ✅ Detects battery cameras (port 9000) in `camera_config.json`
-- ✅ Auto-generates `neolink.toml` configuration
-- ✅ Starts Neolink Docker container
+- Auto-generates `reolinkproxy.env` configuration
+- Starts ReolinkProxy Docker container
 - ✅ The app stores/uses `rtsp://localhost:8554/...` URLs for these cameras
 
 #### Manual Setup
@@ -210,14 +226,14 @@ This is handled in two places:
 If you prefer manual control:
 
 ```bash
-# 1. Generate neolink.toml from your camera config
-python3 neolink_manager.py
+# 1. Generate reolinkproxy.env from your camera config
+python3 reolinkproxy_manager.py --auto-update
 
-# 2. Start Neolink container
+# 2. Start ReolinkProxy container
 docker compose up -d
 
-# 3. Check Neolink logs
-docker logs wildcam-neolink
+# 3. Check ReolinkProxy logs
+docker logs wildcam-reolinkproxy
 
 # 4. Start WildCam
 python3 main.py
@@ -225,9 +241,10 @@ python3 main.py
 
 If you distribute WildCam as a standalone build:
 
-- the bundle can include `docker-compose.yml`, `neolink_manager.py`, `neolink.toml` (if present), and the app itself
-- but it still does **not** include the external Neolink container/image
-- users who rely on Reolink battery / Baichuan cameras still need Docker/Compose or a separately installed `neolink`
+- the bundle can include `docker-compose.yml`, `reolinkproxy_manager.py`, `camera_config.json.example`, and the app itself
+- `reolinkproxy.env` is not bundled because it is generated locally and can contain credentials
+- but it still does **not** include the external ReolinkProxy container/image
+- users who rely on Reolink battery / Baichuan cameras still need Docker/Compose or a separately installed `reolinkproxy`
 
 #### How it Works
 
@@ -242,26 +259,29 @@ The script scans `camera_config.json` for cameras using port 9000:
 }
 ```
 
-**2. Neolink Config Generation:**
-Creates `neolink.toml` automatically:
-```toml
-[[cameras]]
-name = "ArgusCamera"
-username = "admin"
-password = "password"
-address = "192.168.8.58:9000"
-uid = "9527000KVKX2161S"
-idle_disconnect = true
+**2. ReolinkProxy Config Generation:**
+Creates `reolinkproxy.env` automatically:
+```env
+REOLINK_CAMERA_0_NAME="ArgusCamera"
+REOLINK_CAMERA_0_HOST="192.168.8.58"
+REOLINK_CAMERA_0_PORT=9000
+REOLINK_CAMERA_0_USERNAME="admin"
+REOLINK_CAMERA_0_PASSWORD="password"
+REOLINK_CAMERA_0_UID="9527000KVKX2161S"
+REOLINK_CAMERA_0_RTSP_PATH="ArgusCamera/mainStream"
+REOLINK_CAMERA_0_BATTERY_CAMERA=true
+REOLINK_CAMERA_0_PAUSE_ON_CLIENT=true
+REOLINK_CAMERA_0_IDLE_DISCONNECT=true
 ```
 
 **3. URL Conversion (Optional):**
-Updates camera URLs to use Neolink:
+Updates camera URLs to use ReolinkProxy:
 ```
 Before: rtsp://admin:password@192.168.8.58:9000/...
 After:  rtsp://localhost:8554/ArgusCamera/mainStream
 ```
 
-#### Stopping Neolink
+#### Stopping ReolinkProxy
 
 ```bash
 docker compose down
@@ -276,12 +296,12 @@ docker compose down
 
 The repository contains helper scripts using PyInstaller.
 
-Note about Neolink:
+Note about ReolinkProxy:
 
-- The packaged app bundles WildCam and helper files such as `docker-compose.yml` and `neolink_manager.py`.
-- The actual Neolink runtime is **not** bundled into the app archive.
+- The packaged app bundles WildCam and helper files such as `docker-compose.yml` and `reolinkproxy_manager.py`.
+- The actual ReolinkProxy runtime is **not** bundled into the app archive.
 - If you use only normal RTSP cameras, the standalone app is enough.
-- If you use Reolink WLAN / battery cameras, you must additionally run Neolink externally.
+- If you use Reolink WLAN / battery cameras, you must additionally run ReolinkProxy externally.
 
 ### Linux
 

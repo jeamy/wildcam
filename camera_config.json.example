@@ -2,9 +2,21 @@
   "cameras": [
     {
       "id": 1,
-      "url": "rtsp://admin:password@192.168.1.100:554/h264Preview_01_main",
+      "url": "rtsp://localhost:8554/Eingang/mainStream",
       "name": "Eingang",
-      "uid": "9527000000000000"
+      "uid": "9527000000000000",
+      "proxy": {
+        "type": "reolinkproxy",
+        "host": "192.168.1.100",
+        "port": 9000,
+        "username": "admin",
+        "password": "password",
+        "stream": "main",
+        "battery": true,
+        "pause_on_client": true,
+        "idle_disconnect": true,
+        "idle_timeout": "30s"
+      }
     }
   ],
   "recording_path": "~/Videos/Reolink",

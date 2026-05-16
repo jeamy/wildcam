@@ -56,7 +56,7 @@ if (!(Test-Path $bundlePath)) {
 $extraFiles = @(
   "README.md",
   "docker-compose.yml",
-  "neolink_manager.py",
+  "reolinkproxy_manager.py",
   "camera_config.json.example"
 )
 
@@ -64,10 +64,6 @@ foreach ($extraFile in $extraFiles) {
   if (Test-Path $extraFile) {
     Copy-Item $extraFile -Destination $bundlePath -Force
   }
-}
-
-if (Test-Path "neolink.toml") {
-  Copy-Item "neolink.toml" -Destination $bundlePath -Force
 }
 
 if ([string]::IsNullOrWhiteSpace($ArtifactSuffix)) {

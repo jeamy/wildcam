@@ -76,15 +76,12 @@ if [[ ! -e "$BUNDLE_PATH" ]]; then
 fi
 
 if [[ -d "$BUNDLE_PATH" ]]; then
-  for extra_file in README.md docker-compose.yml neolink_manager.py camera_config.json.example; do
+  for extra_file in README.md docker-compose.yml reolinkproxy_manager.py camera_config.json.example; do
     if [[ -f "$extra_file" ]]; then
       cp "$extra_file" "$BUNDLE_PATH/"
     fi
   done
 
-  if [[ -f "neolink.toml" ]]; then
-    cp "neolink.toml" "$BUNDLE_PATH/"
-  fi
 fi
 
 ZIP_PATH="$DIST_DIR/${APP_NAME}_${PLATFORM}_${ARTIFACT_SUFFIX}.zip"

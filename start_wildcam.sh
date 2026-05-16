@@ -1,5 +1,5 @@
 #!/bin/bash
-# WildCam Start-Script mit automatischem Neolink-Setup
+# WildCam Start-Script mit automatischem ReolinkProxy-Setup
 
 set -e
 
@@ -22,13 +22,13 @@ if [ ! -f "camera_config.json" ]; then
     fi
 fi
 
-# Generiere Neolink Config wenn Battery-Kameras vorhanden
+# Generiere ReolinkProxy Config wenn Battery-Kameras vorhanden
 echo ""
 echo "🔋 Prüfe auf Battery-Kameras (Port 9000)..."
-python3 neolink_manager.py
+python3 reolinkproxy_manager.py --auto-update
 
-# Starte Neolink wenn neolink.toml existiert
-if [ -f "neolink.toml" ]; then
+# Starte ReolinkProxy wenn reolinkproxy.env existiert
+if [ -f "reolinkproxy.env" ]; then
     echo ""
     
     # Prüfe ob Docker läuft
@@ -42,18 +42,18 @@ if [ -f "neolink.toml" ]; then
     docker compose up -d
     
     # Warte kurz für Container-Start
-    echo "⏳ Warte auf Neolink..."
+    echo "⏳ Warte auf ReolinkProxy..."
     sleep 3
     
     # Prüfe ob Container läuft
-    if docker ps | grep -q wildcam-neolink; then
-        echo "✅ Neolink läuft (localhost:8554)"
+    if docker ps | grep -q wildcam-reolinkproxy; then
+        echo "✅ ReolinkProxy läuft (localhost:8554)"
     else
-        echo "⚠️  Neolink Container nicht gestartet"
-        echo "   Logs: docker logs wildcam-neolink"
+        echo "⚠️  ReolinkProxy Container nicht gestartet"
+        echo "   Logs: docker logs wildcam-reolinkproxy"
     fi
 else
-    echo "ℹ️  Keine Battery-Kameras - Neolink nicht benötigt"
+    echo "ℹ️  Keine Battery-Kameras - ReolinkProxy nicht benötigt"
 fi
 
 # Starte WildCam
