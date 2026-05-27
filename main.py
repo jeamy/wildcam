@@ -9,25 +9,44 @@ os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|loglevel;quiet
 
 import cv2
 import numpy as np
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                             QHBoxLayout, QGridLayout, QPushButton, QLabel, 
-                             QLineEdit, QSpinBox, QCheckBox, QFileDialog,
-                             QMessageBox, QComboBox, QGroupBox, QScrollArea,
-                             QProgressBar, QDialog, QDialogButtonBox, QTableWidget,
-                             QTableWidgetItem, QHeaderView, QSizePolicy, QSplitter,
-                             QTabWidget, QStyle, QProgressDialog)
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QMimeData, QSize, QEvent, QRect
-from PyQt6.QtGui import QImage, QPixmap, QDrag, QIcon, QPainter, QPen, QColor
+from PyQt6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QFileDialog,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QSpinBox,
+    QSplitter,
+    QStyle,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PyQt6.QtGui import QImage, QPixmap
 from datetime import datetime
-import json
-import socket
-import requests
-from requests.auth import HTTPDigestAuth
-import ipaddress
-import threading
-from urllib.parse import urlparse, quote
-import struct
 import time
+
+from camera_utils import (
+    _build_rtsp_url,
+    _is_battery_camera,
+    normalize_reolinkproxy_camera,
+)
+from config import DEFAULT_RECORDING_PATH, config_payload, load_config_data, save_config_data, snapshot_path_for
+from dialogs import CameraDiscoveryDialog, CameraEditDialog
+from i18n import set_language, tr
+from stream import CameraThread
+from ui_resources import load_svg_icon
+from widgets import CameraListContainer, CameraWidget, PreviewLabel
 
 try:
     import sip  # type: ignore
@@ -36,1863 +55,6 @@ except Exception:  # pragma: no cover
         from PyQt6 import sip  # type: ignore
     except Exception:  # pragma: no cover
         sip = None
-
-
-CURRENT_LANG = "de"
-
-
-def resource_path(relative_path: str) -> str:
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        base_path = sys._MEIPASS  # type: ignore[attr-defined]
-    else:
-        base_path = os.path.abspath(os.path.dirname(__file__))
-    return os.path.join(base_path, relative_path)
-
-
-def load_svg_icon(name: str) -> QIcon:
-    return QIcon(resource_path(os.path.join("assets", "icons", name)))
-
-
-TRANSLATIONS = {
-    "de": {
-        "app.title": "Reolink Multi-Camera Viewer",
-        "tab.cameras": "Kameras",
-        "tab.config": "Konfiguration",
-        "group.camera_config": "Kamera-Konfiguration",
-        "label.rtsp_url": "RTSP URL:",
-        "label.name": "Name:",
-        "placeholder.rtsp_url": "rtsp://admin:password@192.168.1.100:554/h264Preview_01_main",
-        "placeholder.name.short": "z.B. Eingang",
-        "btn.add": "Hinzufügen",
-        "btn.discover": "Auto-Suche",
-        "btn.clear_all": "Alle entfernen",
-        "btn.path": "Speicherort",
-        "btn.start_all": "Alle Streams starten",
-        "btn.stop_all": "Alle Streams stoppen",
-        "btn.record_all": "Alle aufnehmen",
-        "btn.record_all_stop": "Alle stoppen",
-        "label.camera_count": "Kameras: {total} | Aktiv: {active}",
-        "big.select_camera": "Kamera auswählen…",
-        "status.ready": "Bereit - CPU-optimiert für parallele Streams",
-        "status.auto_added": "{count} Kameras automatisch hinzugefügt",
-        "status.camera_added": "{name} hinzugefügt",
-        "status.camera_updated": "Kamera {name} aktualisiert",
-        "status.stream_started": "Stream für {name} gestartet",
-        "status.streams_starting": "{count} Streams werden parallel gestartet...",
-        "status.streams_stopped": "Alle Streams gestoppt",
-        "status.camera_removed": "Kamera {id} entfernt",
-        "status.cameras_removed": "Alle Kameras entfernt",
-        "dialog.title.info": "Info",
-        "dialog.title.error": "Fehler",
-        "dialog.title.confirm": "Bestätigung",
-        "dialog.msg.no_cameras": "Keine Kameras konfiguriert!",
-        "dialog.confirm.remove_all": "Alle Kameras entfernen?",
-        "dialog.confirm.remove_one": "Kamera '{name}' wirklich entfernen?",
-        "dialog.path.choose": "Speicherort wählen",
-        "label.cameras_per_row": "Kameras pro Reihe:",
-        "status.path": "Speicherort: {path}",
-        "status.no_image": "Kein Bild verfügbar",
-        "status.snapshot_saved": "Snapshot gespeichert: {name}",
-        "status.snapshot_error": "Snapshot Fehler: {error}",
-        "status.recording": "Aufnahme: {name}",
-        "status.recording_stopped": "Aufnahme gestoppt: {name}",
-        "status.recordings_started": "{count} Aufnahmen gestartet",
-        "status.recordings_stopped": "{count} Aufnahmen gestoppt",
-        "camera.preview.click_to_start": "Stream starten klicken",
-        "camera.preview.waiting": "Warte auf Stream...",
-        "camera.preview.retrying": "Versuche erneut...",
-        "camera.status.offline": "Offline",
-        "camera.status.stopped": "Gestoppt",
-        "camera.status.connected": "Verbunden",
-        "camera.status.sleep": "Sleep/Offline",
-        "camera.default_name.id": "Kamera {id}",
-        "camera.default_name.ip": "Kamera {ip}",
-        "camera.meta.unknown": "Unbekannt",
-        "camera.meta.rtsp_camera": "RTSP-Kamera",
-        "camera.error.stream_unreachable": "Stream nicht erreichbar",
-        "camera.error.stream_interrupted": "Stream unterbrochen",
-        "camera.tooltip.record": "Aufzeichnung starten/stoppen",
-        "camera.tooltip.stream": "Stream starten/stoppen",
-        "camera.tooltip.snapshot": "Einzelbild speichern",
-        "camera.tooltip.edit": "Kamera bearbeiten",
-        "camera.tooltip.remove": "Kamera entfernen",
-        "dialog.edit.title": "Kamera bearbeiten",
-        "dialog.edit.name": "Name:",
-        "dialog.edit.name_ph": "z.B. Eingang Haupttür",
-        "dialog.edit.rtsp_url": "RTSP URL:",
-        "dialog.edit.rtsp_ph": "rtsp://admin:password@192.168.1.100:554/h264Preview_01_main",
-        "dialog.edit.help_group": "RTSP URL Format",
-        "dialog.edit.help_text": "Standard Format: rtsp://username:password@ip:port/pfad\n\nReolink Beispiele:\n• Main Stream: rtsp://admin:pass@192.168.1.100:554/h264Preview_01_main\n• Sub Stream: rtsp://admin:pass@192.168.1.100:554/h264Preview_01_sub\n\nAndere Kameras:\n• ONVIF: rtsp://admin:pass@192.168.1.100:554/onvif1\n• Hikvision: rtsp://admin:pass@192.168.1.100:554/Streaming/Channels/101",
-        "dialog.edit.builder_group": "Schnell-Editor",
-        "dialog.edit.ip": "IP:",
-        "dialog.edit.ip_ph": "192.168.1.100",
-        "dialog.edit.port": "Port:",
-        "dialog.edit.username": "Username:",
-        "dialog.edit.password": "Password:",
-        "dialog.edit.path": "Pfad:",
-        "dialog.edit.build_url": "→ URL Generieren",
-        "dialog.edit.err_ip": "Bitte IP-Adresse eingeben!",
-        "dialog.discovery.title": "Kamera-Suche im Netzwerk",
-        "dialog.discovery.scan_config": "Scan-Konfiguration",
-        "dialog.discovery.network": "Netzwerk:",
-        "dialog.discovery.network_ph": "192.168.1.0/24",
-        "dialog.discovery.username": "Benutzername:",
-        "dialog.discovery.password": "Passwort:",
-        "dialog.discovery.start": "🔍 Suche starten",
-        "dialog.discovery.stop": "⏹ Stoppen",
-        "dialog.discovery.ready": "Bereit zum Scannen",
-        "dialog.discovery.found": "Gefundene Kameras",
-        "dialog.discovery.col.select": "Auswählen",
-        "dialog.discovery.col.ip": "IP-Adresse",
-        "dialog.discovery.col.name": "Name",
-        "dialog.discovery.col.model": "Modell",
-        "dialog.discovery.col.manufacturer": "Hersteller",
-        "dialog.discovery.col.ports": "Ports",
-        "dialog.discovery.col.uid": "UID",
-        "dialog.discovery.err_network": "Bitte Netzwerk-Bereich eingeben!",
-        "dialog.discovery.scan_cancelled": "Scan abgebrochen - {count} Kameras gefunden",
-        "dialog.discovery.scan_done": "Scan abgeschlossen - {count} Kameras gefunden",
-        "label.uid": "UID (optional):",
-        "placeholder.uid": "z.B. 9527000000000000",
-        "scan.checking": "Prüfe {ip}...",
-        "scan.error": "Fehler: {error}",
-        "error.prefix": "Fehler: {error}",
-        "label.language": "Sprache:",
-        "language.de": "Deutsch",
-        "language.en": "English",
-        "battery.warning.title": "⚠️ Akku-Kamera erkannt",
-        "battery.warning.message": "Die Kamera '{name}' ({model}) ist eine Akku-betriebene Kamera.\n\n"
-                                   "⚡ WICHTIG:\n"
-                                   "• RTSP-Streaming ist eingeschränkt (Kamera schläft automatisch)\n"
-                                   "• Akku wird bei Dauerstream stark belastet\n"
-                                   "• Stream kann nach 30-60 Sekunden abbrechen\n\n"
-                                   "💡 EMPFEHLUNG:\n"
-                                   "Verwende ReolinkProxy als Proxy für stabiles Streaming:\n"
-                                   "https://github.com/Shareed2k/reolinkproxy\n\n"
-                                   "Siehe README für ReolinkProxy-Konfiguration.\n\n"
-                                   "Kamera trotzdem hinzufügen?",
-        "battery.indicator": "🔋 AKKU",
-    },
-    "en": {
-        "app.title": "Reolink Multi-Camera Viewer",
-        "tab.cameras": "Cameras",
-        "tab.config": "Settings",
-        "group.camera_config": "Camera Configuration",
-        "label.rtsp_url": "RTSP URL:",
-        "label.name": "Name:",
-        "placeholder.rtsp_url": "rtsp://admin:password@192.168.1.100:554/h264Preview_01_main",
-        "placeholder.name.short": "e.g. Entrance",
-        "btn.add": "➕ Add",
-        "btn.discover": "🔍 Auto-Discover",
-        "btn.clear_all": "Remove all",
-        "btn.path": "📁 Storage",
-        "btn.start_all": "▶ Start all streams",
-        "btn.stop_all": "⏹ Stop all streams",
-        "btn.record_all": "● Record all",
-        "btn.record_all_stop": "■ Stop all",
-        "label.camera_count": "Cameras: {total} | Active: {active}",
-        "big.select_camera": "Select a camera…",
-        "status.ready": "Ready - CPU-optimized for parallel streams",
-        "status.auto_added": "{count} cameras added automatically",
-        "status.camera_added": "{name} added",
-        "status.camera_updated": "Camera {name} updated",
-        "status.stream_started": "Stream started for {name}",
-        "status.streams_starting": "Starting {count} streams in parallel...",
-        "status.streams_stopped": "All streams stopped",
-        "status.camera_removed": "Camera {id} removed",
-        "status.cameras_removed": "All cameras removed",
-        "dialog.title.info": "Info",
-        "dialog.title.error": "Error",
-        "dialog.title.confirm": "Confirm",
-        "dialog.msg.no_cameras": "No cameras configured!",
-        "dialog.confirm.remove_all": "Remove all cameras?",
-        "dialog.confirm.remove_one": "Remove camera '{name}'?",
-        "dialog.path.choose": "Choose storage folder",
-        "label.cameras_per_row": "Cameras per row:",
-        "status.path": "Storage: {path}",
-        "status.no_image": "No image available",
-        "status.snapshot_saved": "Snapshot saved: {name}",
-        "status.snapshot_error": "Snapshot error: {error}",
-        "status.recording": "Recording: {name}",
-        "status.recording_stopped": "Recording stopped: {name}",
-        "status.recordings_started": "{count} recordings started",
-        "status.recordings_stopped": "{count} recordings stopped",
-        "camera.preview.click_to_start": "Click start stream",
-        "camera.preview.waiting": "Waiting for stream...",
-        "camera.preview.retrying": "Retrying...",
-        "camera.status.offline": "Offline",
-        "camera.status.stopped": "Stopped",
-        "camera.status.connected": "Connected",
-        "camera.status.sleep": "Sleep/Offline",
-        "camera.default_name.id": "Camera {id}",
-        "camera.default_name.ip": "Camera {ip}",
-        "camera.meta.unknown": "Unknown",
-        "camera.meta.rtsp_camera": "RTSP camera",
-        "camera.error.stream_unreachable": "Stream unreachable",
-        "camera.error.stream_interrupted": "Stream interrupted",
-        "camera.tooltip.record": "Start/stop recording",
-        "camera.tooltip.stream": "Start/stop stream",
-        "camera.tooltip.snapshot": "Save snapshot",
-        "camera.tooltip.edit": "Edit camera",
-        "camera.tooltip.remove": "Remove camera",
-        "dialog.edit.title": "Edit camera",
-        "dialog.edit.name": "Name:",
-        "dialog.edit.name_ph": "e.g. Front door",
-        "dialog.edit.rtsp_url": "RTSP URL:",
-        "dialog.edit.rtsp_ph": "rtsp://admin:password@192.168.1.100:554/h264Preview_01_main",
-        "dialog.edit.help_group": "RTSP URL format",
-        "dialog.edit.help_text": "Standard format: rtsp://username:password@ip:port/path\n\nReolink examples:\n• Main stream: rtsp://admin:pass@192.168.1.100:554/h264Preview_01_main\n• Sub stream: rtsp://admin:pass@192.168.1.100:554/h264Preview_01_sub\n\nOther cameras:\n• ONVIF: rtsp://admin:pass@192.168.1.100:554/onvif1\n• Hikvision: rtsp://admin:pass@192.168.1.100:554/Streaming/Channels/101",
-        "dialog.edit.builder_group": "Quick editor",
-        "dialog.edit.ip": "IP:",
-        "dialog.edit.ip_ph": "192.168.1.100",
-        "dialog.edit.port": "Port:",
-        "dialog.edit.username": "Username:",
-        "dialog.edit.password": "Password:",
-        "dialog.edit.path": "Path:",
-        "dialog.edit.build_url": "→ Build URL",
-        "dialog.edit.err_ip": "Please enter an IP address!",
-        "dialog.discovery.title": "Network camera discovery",
-        "dialog.discovery.scan_config": "Scan configuration",
-        "dialog.discovery.network": "Network:",
-        "dialog.discovery.network_ph": "192.168.1.0/24",
-        "dialog.discovery.username": "Username:",
-        "dialog.discovery.password": "Password:",
-        "dialog.discovery.start": "🔍 Start scan",
-        "dialog.discovery.stop": "⏹ Stop",
-        "dialog.discovery.ready": "Ready to scan",
-        "dialog.discovery.found": "Found cameras",
-        "dialog.discovery.col.select": "Select",
-        "dialog.discovery.col.ip": "IP address",
-        "dialog.discovery.col.name": "Name",
-        "dialog.discovery.col.model": "Model",
-        "dialog.discovery.col.manufacturer": "Vendor",
-        "dialog.discovery.col.ports": "Ports",
-        "dialog.discovery.col.uid": "UID",
-        "dialog.discovery.err_network": "Please enter a network range!",
-        "dialog.discovery.scan_cancelled": "Scan cancelled - {count} cameras found",
-        "dialog.discovery.scan_done": "Scan finished - {count} cameras found",
-        "label.uid": "UID (optional):", # Added by instruction
-        "placeholder.uid": "e.g. 9527000000000000", # Added by instruction
-        "scan.checking": "Checking {ip}...",
-        "scan.error": "Error: {error}",
-        "error.prefix": "Error: {error}",
-        "label.language": "Language:",
-        "language.de": "Deutsch",
-        "language.en": "English",
-        "battery.warning.title": "⚠️ Battery Camera Detected",
-        "battery.warning.message": "Camera '{name}' ({model}) is battery-powered.\n\n"
-                                   "⚡ IMPORTANT:\n"
-                                   "• RTSP streaming is limited (camera sleeps automatically)\n"
-                                   "• Battery drains quickly with continuous streaming\n"
-                                   "• Stream may disconnect after 30-60 seconds\n\n"
-                                   "💡 RECOMMENDATION:\n"
-                                   "Use ReolinkProxy as proxy for stable streaming:\n"
-                                   "https://github.com/Shareed2k/reolinkproxy\n\n"
-                                   "See README for ReolinkProxy configuration.\n\n"
-                                   "Add camera anyway?",
-        "battery.indicator": "🔋 BATTERY",
-    },
-}
-
-
-def set_language(lang: str):
-    global CURRENT_LANG
-    if lang in TRANSLATIONS:
-        CURRENT_LANG = lang
-
-
-def tr(key: str, **kwargs) -> str:
-    lang_map = TRANSLATIONS.get(CURRENT_LANG) or TRANSLATIONS["de"]
-    s = lang_map.get(key) or TRANSLATIONS["de"].get(key) or key
-    try:
-        return s.format(**kwargs)
-    except Exception:
-        return s
-
-
-def _parse_rtsp_url(rtsp_url: str):
-    """Best-effort RTSP URL parsing (host/port/user/pass)."""
-    try:
-        u = urlparse(rtsp_url, allow_fragments=False)
-        if not u.hostname and "#" in rtsp_url:
-            sanitized = rtsp_url.replace("#", "%23")
-            u = urlparse(sanitized, allow_fragments=False)
-        host = u.hostname
-        port = u.port or 554
-        user = u.username
-        password = u.password
-        return host, port, user, password
-    except Exception:
-        return None, 554, None, None
-
-
-def _normalize_rtsp_url(rtsp_url: str) -> str:
-    """Normalize RTSP URL to always include explicit port to avoid FFmpeg TCP fallback errors."""
-    try:
-        u = urlparse(rtsp_url)
-        if not u.scheme or u.scheme not in ('rtsp', 'rtsps'):
-            return rtsp_url
-        
-        # Ensure port is explicit
-        port = u.port or 554
-        host = u.hostname
-        if not host:
-            return rtsp_url
-        
-        # Rebuild URL with explicit port
-        auth = f"{u.username}:{u.password}@" if u.username else ""
-        path = u.path or "/"
-        query = f"?{u.query}" if u.query else ""
-        
-        return f"{u.scheme}://{auth}{host}:{port}{path}{query}"
-    except Exception:
-        return rtsp_url
-
-
-def _is_battery_camera(model: str, name: str = "") -> bool:
-    """Check if camera is battery-powered based on model/name."""
-    if not model and not name:
-        return False
-    
-    search_text = f"{model} {name}".lower()
-    
-    # Known battery camera series/models
-    battery_keywords = [
-        "argus",      # Argus series (Argus 2, 3, PT, Eco, Ultra)
-        "go",         # Go series (Go, Go Plus, Go PT)
-        "altas",      # Altas PT Ultra
-        "battery",    # Explicit battery mention
-        "solar",      # Solar-powered (usually battery)
-    ]
-    
-    return any(keyword in search_text for keyword in battery_keywords)
-
-
-def _build_rtsp_url(host: str, port: int = 554, username: str = "", password: str = "", 
-                    path: str = "h264Preview_01_main", scheme: str = "rtsp") -> str:
-    """Build RTSP URL with proper URL-encoding for credentials containing special characters.
-    
-    Args:
-        host: Camera IP or hostname
-        port: RTSP port (default 554)
-        username: Username (will be URL-encoded)
-        password: Password (will be URL-encoded) 
-        path: RTSP path (default h264Preview_01_main)
-        scheme: URL scheme (rtsp or rtsps)
-    
-    Returns:
-        Properly formatted RTSP URL with encoded credentials
-    """
-    # URL-encode credentials to handle special characters like #, @, :, etc.
-    # safe='' means encode ALL special characters
-    encoded_user = quote(username, safe='') if username else ''
-    encoded_pass = quote(password, safe='') if password else ''
-    
-    # Build auth string
-    if encoded_user and encoded_pass:
-        auth = f"{encoded_user}:{encoded_pass}@"
-    elif encoded_user:
-        auth = f"{encoded_user}@"
-    else:
-        auth = ""
-    
-    # Ensure path starts with /
-    if path and not path.startswith('/'):
-        path = f"/{path}"
-    
-    return f"{scheme}://{auth}{host}:{port}{path}"
-
-
-def _reolinkproxy_camera_name(name: str) -> str:
-    """Normalize camera name for ReolinkProxy stream path."""
-    return (name or "Camera").strip().replace(" ", "_")
-
-
-def _reolinkproxy_rtsp_url(name: str, port: int = 8554) -> str:
-    cam_name = _reolinkproxy_camera_name(name)
-    return f"rtsp://localhost:{port}/{cam_name}/mainStream"
-
-
-def _reolinkproxy_proxy_config(rtsp_url: str, name: str, username: str, password: str, uid: str = "", model: str = "", manufacturer: str = "") -> dict | None:
-    """Build a persistent proxy config for Reolink WLAN/Battery cameras."""
-    host, port, user, pwd = _parse_rtsp_url(rtsp_url)
-    if host in ("localhost", "127.0.0.1") and port == 8554:
-        return None
-
-    is_reolink = (
-        (manufacturer or "").lower() == "reolink"
-        or "reolink" in (model or "").lower()
-        or port == 9000
-    )
-    use_reolinkproxy = port == 9000 or _is_battery_camera(model, name)
-
-    if not (is_reolink and use_reolinkproxy and host):
-        return None
-
-    proxy_port = int(port or 9000)
-
-    return {
-        "type": "reolinkproxy",
-        "host": host,
-        "port": proxy_port,
-        "username": username or user or "",
-        "password": password or pwd or "",
-        "stream": "main",
-        "battery": True,
-        "pause_on_client": True,
-        "idle_disconnect": True,
-        "idle_timeout": "30s",
-    }
-
-
-def _maybe_use_reolinkproxy(rtsp_url: str, name: str, username: str, password: str, uid: str = "", model: str = "", manufacturer: str = "") -> str:
-    """Switch Reolink WLAN/Battery cameras to the local ReolinkProxy RTSP URL."""
-    if _reolinkproxy_proxy_config(rtsp_url, name, username, password, uid, model, manufacturer):
-        return _reolinkproxy_rtsp_url(name)
-    return rtsp_url
-
-
-def _tcp_probe(host: str, port: int, timeout: float = 0.7) -> tuple[bool, str]:
-    """Fast TCP reachability check.
-
-    Returns (ok, reason) where reason is one of: ok, timeout, refused, unreachable, error.
-    """
-    if not host:
-        return False, "error"
-    try:
-        sock = socket.create_connection((host, int(port)), timeout=timeout)
-        sock.close()
-        return True, "ok"
-    except ConnectionRefusedError:
-        return False, "refused"
-    except TimeoutError:
-        return False, "timeout"
-    except OSError as e:
-        # e.g. No route to host, network unreachable, etc.
-        if getattr(e, "errno", None) in (101, 113):
-            return False, "unreachable"
-        return False, "error"
-
-
-def _ws_discovery(timeout: float = 2.0) -> list[str]:
-    """ONVIF/WS-Discovery (UDP 3702)."""
-    msg = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<Envelope xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns="http://www.w3.org/2003/05/soap-envelope">'
-        '<Header><MessageID xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">uuid:8253()</MessageID>'
-        '<To xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">urn:schemas-xmlsoap-org:ws:2004:08:discovery</To>'
-        '<Action xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/discovery/Probe</Action></Header>'
-        '<Body><Probe xmlns="http://schemas.xmlsoap.org/ws/2004/08/discovery"><Types>tds:Device</Types></Probe></Body></Envelope>'
-    )
-    ips = set()
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.settimeout(timeout)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(msg.encode(), ("239.255.255.250", 3702))
-        
-        while True:
-            try:
-                data, addr = sock.recvfrom(4096)
-                ips.add(addr[0])
-            except socket.timeout:
-                break
-        sock.close()
-    except: pass
-    return list(ips)
-
-
-def _ssdp_discovery(timeout: float = 2.0) -> list[str]:
-    """UPnP/SSDP Discovery (UDP 1900)."""
-    msg = (
-        'M-SEARCH * HTTP/1.1\r\n'
-        'HOST: 239.255.255.250:1900\r\n'
-        'MAN: "ssdp:discover"\r\n'
-        'MX: 2\r\n'
-        'ST: ssdp:all\r\n'
-        '\r\n'
-    )
-    ips = set()
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.settimeout(timeout)
-        sock.sendto(msg.encode(), ("239.255.255.250", 1900))
-        
-        while True:
-            try:
-                data, addr = sock.recvfrom(4096)
-                ips.add(addr[0])
-            except socket.timeout:
-                break
-        sock.close()
-    except: pass
-    return list(ips)
-
-
-def _udp_reolink_probe(ip: str, timeout: float = 2.0) -> list | dict | None:
-    """Sendet ein Reolink UDP Discovery Paket an eine spezifische oder Broadcast IP."""
-    ports = [9000, 10000, 2000]
-    
-    # Discovery JSON Payloads (GetDevInfo und Search)
-    payloads = [
-        [{"cmd": "GetDevInfo", "action": 0, "param": {}}],
-        {"cmd": "GetDevInfo", "action": 0, "param": {}},
-        [{"cmd": "Search", "action": 0, "param": {}}],
-        {"cmd": "Search", "action": 0, "param": {}}
-    ]
-    
-    results = []
-    
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.settimeout(timeout)
-    if ip == "255.255.255.255":
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-    for port in ports:
-        for cmd_data in payloads:
-            data = json.dumps(cmd_data).encode('utf-8')
-            for endian in ['<', '>']:
-                header = struct.pack(endian + "2sHHHII", b"BC", 0, 1, 0, len(data), 0)
-                payload = header + data
-                try:
-                    # Weck-Schuss
-                    sock.sendto(b"\x00" * 32, (ip, port))
-                    sock.sendto(payload, (ip, port))
-                    
-                    while True:
-                        try:
-                            resp_data, addr = sock.recvfrom(4096)
-                        except socket.timeout:
-                            break
-                            
-                        if len(resp_data) >= 16:
-                            idx = -1
-                            for i in range(len(resp_data) - 1):
-                                if resp_data[i:i+2].lower() == b"bc":
-                                    for j in range(i+2, min(i+48, len(resp_data))):
-                                        if resp_data[j] in (ord('['), ord('{')):
-                                            idx = j
-                                            break
-                                    if idx != -1: break
-                            
-                            if idx != -1:
-                                content = resp_data[idx:].decode('utf-8', 'ignore')
-                                if content.startswith('['): end = content.rfind(']')
-                                else: end = content.rfind('}')
-                                
-                                if end != -1:
-                                    try:
-                                        res = json.loads(content[:end+1])
-                                        info = None
-                                        # Wir suchen nach DevInfo oder Search-Response
-                                        val = res[0].get('value', {}) if isinstance(res, list) else res.get('value', {})
-                                        info = val.get('DevInfo') or val.get('SearchResult') or val
-                                        
-                                        if info and (info.get('name') or info.get('serial') or info.get('mac')):
-                                            info['remote_ip'] = addr[0]
-                                            if ip != "255.255.255.255":
-                                                sock.close()
-                                                return info
-                                            if info.get('remote_ip') not in [r.get('remote_ip') for r in results]:
-                                                results.append(info)
-                                    except: pass
-                        if ip != "255.255.255.255": break
-                except: break
-            if ip != "255.255.255.255" and results: break
-    
-    sock.close()
-    return results if ip == "255.255.255.255" else (results[0] if results else None)
-
-
-def _udp_reolink_wake(ip: str, uid: str = ""):
-    """Sendet einen intensiven Weck-Burst an eine Reolink Kamera."""
-    if not ip: return
-    try:
-        # Falls UID vorhanden, bauen wir ein echtes Abfrage-Paket
-        payload = b""
-        if uid:
-            msg = [{"cmd": "GetDevInfo", "action": 0, "param": {}}]
-            data = json.dumps(msg).encode('utf-8')
-            header = struct.pack("<2sHHHII", b"BC", 0, 1, 0, len(data), 0)
-            payload = header + data
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Wir pingen alle relevanten Ports mehrfach
-        for port in [9000, 10000, 8000]:
-            for _ in range(5):
-                # Null-Bytes zum "Aufwecken" des WLAN/PIR
-                sock.sendto(b"\x00" * 64, (ip, port))
-                if payload:
-                    # Gezielte Abfrage mit UID (Baichuan)
-                    sock.sendto(payload, (ip, port))
-                else:
-                    # Generischer Header
-                    h = struct.pack("<2sHHHII", b"BC", 0, 1, 0, 0, 0)
-                    sock.sendto(h, (ip, port))
-                time.sleep(0.02)
-        sock.close()
-    except: pass
-
-
-class CameraListContainer(QWidget):
-    order_changed = pyqtSignal(object)  # list[int]
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setAcceptDrops(True)
-        self._layout = QVBoxLayout(self)
-        self._layout.setSpacing(8)
-        self._layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-
-    @property
-    def layout_ref(self) -> QVBoxLayout:
-        return self._layout
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasFormat("application/x-wildcam-camera-id"):
-            event.acceptProposedAction()
-        else:
-            super().dragEnterEvent(event)
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasFormat("application/x-wildcam-camera-id"):
-            event.acceptProposedAction()
-        else:
-            super().dragMoveEvent(event)
-
-    def dropEvent(self, event):
-        if not event.mimeData().hasFormat("application/x-wildcam-camera-id"):
-            super().dropEvent(event)
-            return
-
-        data = bytes(event.mimeData().data("application/x-wildcam-camera-id")).decode("utf-8", "ignore")
-        try:
-            dragged_id = int(data)
-        except Exception:
-            event.ignore()
-            return
-
-        ordered_ids = []
-        for i in range(self._layout.count()):
-            item = self._layout.itemAt(i)
-            w = item.widget() if item else None
-            if w is not None and hasattr(w, "camera_id"):
-                ordered_ids.append(int(getattr(w, "camera_id")))
-
-        if dragged_id not in ordered_ids:
-            event.ignore()
-            return
-
-        drop_y = event.position().y() if hasattr(event, "position") else event.pos().y()
-        insert_index = len(ordered_ids)
-        for idx in range(self._layout.count()):
-            item = self._layout.itemAt(idx)
-            w = item.widget() if item else None
-            if w is None:
-                continue
-            mid = w.y() + (w.height() / 2)
-            if drop_y < mid:
-                insert_index = idx
-                break
-
-        ordered_ids.remove(dragged_id)
-        if insert_index > len(ordered_ids):
-            insert_index = len(ordered_ids)
-        ordered_ids.insert(insert_index, dragged_id)
-
-        event.acceptProposedAction()
-        QTimer.singleShot(0, lambda: self.order_changed.emit(ordered_ids))
-
-
-class CameraDiscoveryThread(QThread):
-    """Thread für automatische Kamera-Suche im Netzwerk"""
-    camera_found = pyqtSignal(dict)  # {ip, name, model, ports, uid}
-    progress_update = pyqtSignal(int, str)
-    scan_complete = pyqtSignal(int)
-    
-    def __init__(self, network_range, ports=None, username="admin", password=""):
-        super().__init__()
-        self.network_range = network_range
-        self.ports = ports or [554, 8000, 80, 8554]  # Typische Reolink/RTSP Ports
-        self.username = username
-        self.password = password
-        self.running = False
-        self.found_cameras = []
-        
-    def run(self):
-        """Netzwerk nach Kameras durchsuchen"""
-        self.running = True
-        self.found_cameras = []
-        
-        try:
-            # 1. Multi-Discovery (UDP Broadcasts)
-            self.progress_update.emit(5, "Starte Netzwerk-Suche (UDP/WS/SSDP)...")
-            
-            discovery_ips = set()
-            
-            # Reolink BC Discovery
-            broadcast_results = _udp_reolink_probe("255.255.255.255", timeout=1.5)
-            if broadcast_results and isinstance(broadcast_results, list):
-                for info in broadcast_results:
-                    discovery_ips.add(info['remote_ip'])
-                    camera_info = {
-                        'ip': info.get('remote_ip', ''),
-                        'ports': [554, 8000, 9000],
-                        'name': info.get('name', 'Reolink Camera'),
-                        'model': info.get('model', 'Unknown'),
-                        'manufacturer': "Reolink",
-                        'uid': info.get('devNo', '') or info.get('serial', '')
-                    }
-                    if camera_info['ip'] not in [c['ip'] for c in self.found_cameras]:
-                        self.found_cameras.append(camera_info)
-                        self.camera_found.emit(camera_info)
-
-            # ONVIF Discovery
-            onvif_ips = _ws_discovery(timeout=1.0)
-            discovery_ips.update(onvif_ips)
-            
-            # SSDP Discovery
-            ssdp_ips = _ssdp_discovery(timeout=1.0)
-            discovery_ips.update(ssdp_ips)
-
-            # Wenn wir Kameras über Broadcast gefunden haben, prüfen wir diese zuerst
-            for dip in discovery_ips:
-                if dip not in [c['ip'] for c in self.found_cameras]:
-                    # Hole Details für diese IP
-                    c_info = self._get_camera_info(dip, [80, 8000, 554, 9000])
-                    if c_info:
-                        self.found_cameras.append(c_info)
-                        self.camera_found.emit(c_info)
-
-            network = ipaddress.ip_network(self.network_range, strict=False)
-            total_hosts = network.num_addresses - 2  # Ohne Netzwerk- und Broadcast-Adresse
-            checked = 0
-            
-            for ip in network.hosts():
-                if not self.running:
-                    break
-                
-                ip_str = str(ip)
-                checked += 1
-                self.progress_update.emit(int((checked / total_hosts) * 100), tr("scan.checking", ip=ip_str))
-                
-                # Schneller Port-Scan
-                open_ports = self._scan_ports(ip_str)
-                
-                if open_ports:
-                    # Versuche Kamera-Info abzurufen
-                    camera_info = self._get_camera_info(ip_str, open_ports)
-                    if camera_info:
-                        self.found_cameras.append(camera_info)
-                        self.camera_found.emit(camera_info)
-            
-            self.scan_complete.emit(len(self.found_cameras))
-            
-        except Exception as e:
-            self.progress_update.emit(100, tr("scan.error", error=str(e)))
-    
-    def _scan_ports(self, ip, timeout=0.5):
-        """Schneller Port-Scan für bestimmte IP"""
-        open_ports = []
-        
-        for port in self.ports:
-            if not self.running:
-                break
-            
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(timeout)
-                result = sock.connect_ex((ip, port))
-                sock.close()
-                
-                if result == 0:
-                    open_ports.append(port)
-            except:
-                pass
-        
-        return open_ports
-    
-    def _get_camera_info(self, ip, ports):
-        """Versuche Kamera-Informationen abzurufen"""
-        camera_info = {
-            'ip': ip,
-            'ports': ports,
-            'name': tr("camera.default_name.ip", ip=ip),
-            'model': tr("camera.meta.unknown"),
-            'manufacturer': tr("camera.meta.unknown"),
-            'uid': '',
-        }
-        
-        # 1. Versuche UDP Reolink Probe (Port 9000) - am besten für UID & Standby
-        udp_info = _udp_reolink_probe(ip)
-        if udp_info:
-            camera_info['name'] = udp_info.get('name', camera_info['name'])
-            camera_info['model'] = udp_info.get('model', camera_info['model'])
-            camera_info['manufacturer'] = "Reolink"
-            camera_info['uid'] = udp_info.get('devNo', '') or udp_info.get('serial', '')
-            return camera_info
-
-        # 2. Versuche ONVIF/HTTP Zugriff
-        if 80 in ports or 8000 in ports:
-            for port in [80, 8000]:
-                if port in ports:
-                    try:
-                        # Reolink API Versuch
-                        url = f"http://{ip}:{port}/api.cgi?cmd=GetDevInfo"
-                        response = requests.get(
-                            url, 
-                            auth=HTTPDigestAuth(self.username, self.password),
-                            timeout=2
-                        )
-                        
-                        if response.status_code == 200:
-                            data = response.json()
-                            if isinstance(data, list) and len(data) > 0:
-                                info = data[0].get('value', {}).get('DevInfo', {})
-                                camera_info['name'] = info.get('name', camera_info['name'])
-                                camera_info['model'] = info.get('model', camera_info['model'])
-                                camera_info['manufacturer'] = "Reolink"
-                                camera_info['uid'] = info.get('devNo', '') or info.get('serial', '')
-                                return camera_info
-                    except:
-                        pass
-        
-        # Wenn HTTP nicht funktioniert, aber RTSP Port offen ist
-        if 554 in ports or 8554 in ports:
-            camera_info['manufacturer'] = tr("camera.meta.rtsp_camera")
-            return camera_info
-        
-        return None
-    
-    def stop(self):
-        """Scan stoppen"""
-        self.running = False
-
-
-class CameraEditDialog(QDialog):
-    """Dialog zum Bearbeiten einer Kamera"""
-    def __init__(self, camera_data, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(tr("dialog.edit.title"))
-        self.setModal(True)
-        self.resize(600, 300)
-        
-        self.camera_data = camera_data.copy()
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout()
-        
-        # Name
-        name_layout = QHBoxLayout()
-        name_layout.addWidget(QLabel(tr("dialog.edit.name")))
-        self.name_input = QLineEdit()
-        self.name_input.setText(self.camera_data.get('name', ''))
-        self.name_input.setPlaceholderText(tr("dialog.edit.name_ph"))
-        name_layout.addWidget(self.name_input)
-        layout.addLayout(name_layout)
-        
-        # RTSP URL
-        url_layout = QVBoxLayout()
-        url_layout.addWidget(QLabel(tr("dialog.edit.rtsp_url")))
-        self.url_input = QLineEdit()
-        self.url_input.setText(self.camera_data.get('url', ''))
-        self.url_input.setPlaceholderText(tr("dialog.edit.rtsp_ph"))
-        url_layout.addWidget(self.url_input)
-        layout.addLayout(url_layout)
-        
-        # UID
-        uid_layout = QHBoxLayout()
-        uid_layout.addWidget(QLabel(tr("label.uid")))
-        self.uid_input = QLineEdit()
-        self.uid_input.setText(self.camera_data.get('uid', ''))
-        self.uid_input.setPlaceholderText(tr("placeholder.uid"))
-        uid_layout.addWidget(self.uid_input)
-        layout.addLayout(uid_layout)
-        
-        # Hilfe-Text
-        help_group = QGroupBox(tr("dialog.edit.help_group"))
-        help_layout = QVBoxLayout()
-        help_text = QLabel(tr("dialog.edit.help_text"))
-        help_text.setWordWrap(True)
-        help_text.setStyleSheet("color: #aaa; font-size: 10px;")
-        help_layout.addWidget(help_text)
-        help_group.setLayout(help_layout)
-        layout.addWidget(help_group)
-        
-        # URL Builder Shortcut
-        builder_group = QGroupBox(tr("dialog.edit.builder_group"))
-        builder_layout = QGridLayout()
-        
-        builder_layout.addWidget(QLabel(tr("dialog.edit.ip")), 0, 0)
-        self.ip_input = QLineEdit()
-        self.ip_input.setPlaceholderText(tr("dialog.edit.ip_ph"))
-        builder_layout.addWidget(self.ip_input, 0, 1)
-        
-        builder_layout.addWidget(QLabel(tr("dialog.edit.port")), 0, 2)
-        self.port_input = QLineEdit()
-        self.port_input.setText("554")
-        self.port_input.setMaximumWidth(60)
-        builder_layout.addWidget(self.port_input, 0, 3)
-        
-        builder_layout.addWidget(QLabel(tr("dialog.edit.username")), 1, 0)
-        self.username_input = QLineEdit()
-        self.username_input.setText("admin")
-        builder_layout.addWidget(self.username_input, 1, 1)
-        
-        builder_layout.addWidget(QLabel(tr("dialog.edit.password")), 1, 2)
-        self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        builder_layout.addWidget(self.password_input, 1, 3)
-        
-        builder_layout.addWidget(QLabel(tr("dialog.edit.path")), 2, 0)
-        self.path_combo = QComboBox()
-        self.path_combo.addItems([
-            "h264Preview_01_main",
-            "h264Preview_01_sub",
-            "onvif1",
-            "Streaming/Channels/101",
-            "stream1",
-            "live"
-        ])
-        self.path_combo.setEditable(True)
-        builder_layout.addWidget(self.path_combo, 2, 1, 1, 3)
-        
-        build_btn = QPushButton(tr("dialog.edit.build_url"))
-        build_btn.clicked.connect(self.build_url)
-        build_btn.setStyleSheet("background-color: #1976d2; color: white;")
-        builder_layout.addWidget(build_btn, 3, 0, 1, 4)
-        
-        builder_group.setLayout(builder_layout)
-        layout.addWidget(builder_group)
-        
-        # Aktuellen URL parsen
-        self.parse_current_url()
-        
-        # Dialog Buttons
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-        
-        self.setLayout(layout)
-    
-    def parse_current_url(self):
-        """Aktuellen URL in Felder zerlegen"""
-        url = self.camera_data.get('url', '')
-        
-        try:
-            # Format: rtsp://username:password@ip:port/path
-            if url.startswith('rtsp://'):
-                url = url[7:]  # "rtsp://" entfernen
-                
-                if '@' in url:
-                    auth, rest = url.split('@', 1)
-                    if ':' in auth:
-                        username, password = auth.split(':', 1)
-                        self.username_input.setText(username)
-                        self.password_input.setText(password)
-                    
-                    if ':' in rest:
-                        ip, port_path = rest.split(':', 1)
-                        self.ip_input.setText(ip)
-                        
-                        if '/' in port_path:
-                            port, path = port_path.split('/', 1)
-                            self.port_input.setText(port)
-                            self.path_combo.setCurrentText(path)
-        except:
-            pass
-    
-    def build_url(self):
-        """URL aus Einzelteilen zusammenbauen"""
-        ip = self.ip_input.text().strip()
-        port = self.port_input.text().strip() or "554"
-        username = self.username_input.text().strip() or "admin"
-        password = self.password_input.text().strip()
-        path = self.path_combo.currentText().strip()
-        
-        if not ip:
-            QMessageBox.warning(self, tr("dialog.title.error"), tr("dialog.edit.err_ip"))
-            return
-        
-        url = _build_rtsp_url(
-            host=ip,
-            port=int(port),
-            username=username,
-            password=password,
-            path=path
-        )
-        self.url_input.setText(url)
-    
-    def get_camera_data(self):
-        """Geänderte Daten zurückgeben"""
-        self.camera_data['name'] = self.name_input.text().strip()
-        self.camera_data['url'] = self.url_input.text().strip()
-        self.camera_data['uid'] = self.uid_input.text().strip()
-        return self.camera_data
-
-
-class CameraDiscoveryDialog(QDialog):
-    """Dialog für Kamera-Suche"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(tr("dialog.discovery.title"))
-        self.setModal(True)
-        self.resize(700, 500)
-        
-        self.found_cameras = []
-        self.discovery_thread = None
-        
-        self.init_ui()
-    
-    def init_ui(self):
-        layout = QVBoxLayout()
-        
-        # Netzwerk-Konfiguration
-        config_group = QGroupBox(tr("dialog.discovery.scan_config"))
-        config_layout = QVBoxLayout()
-        
-        # Netzwerk-Bereich
-        network_layout = QHBoxLayout()
-        network_layout.addWidget(QLabel(tr("dialog.discovery.network")))
-        self.network_input = QLineEdit()
-        self.network_input.setPlaceholderText(tr("dialog.discovery.network_ph"))
-        self.network_input.setText(self._get_local_network())
-        network_layout.addWidget(self.network_input)
-        config_layout.addLayout(network_layout)
-        
-        # Zugangsdaten
-        auth_layout = QHBoxLayout()
-        auth_layout.addWidget(QLabel(tr("dialog.discovery.username")))
-        self.username_input = QLineEdit()
-        self.username_input.setText("admin")
-        auth_layout.addWidget(self.username_input)
-        
-        auth_layout.addWidget(QLabel(tr("dialog.discovery.password")))
-        self.password_input = QLineEdit()
-        self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
-        auth_layout.addWidget(self.password_input)
-        config_layout.addLayout(auth_layout)
-        
-        config_group.setLayout(config_layout)
-        layout.addWidget(config_group)
-        
-        # Scan-Kontrolle
-        scan_layout = QHBoxLayout()
-        self.scan_btn = QPushButton(tr("dialog.discovery.start"))
-        self.scan_btn.clicked.connect(self.start_scan)
-        scan_layout.addWidget(self.scan_btn)
-        
-        self.stop_btn = QPushButton(tr("dialog.discovery.stop"))
-        self.stop_btn.clicked.connect(self.stop_scan)
-        self.stop_btn.setEnabled(False)
-        scan_layout.addWidget(self.stop_btn)
-        
-        scan_layout.addStretch()
-        layout.addLayout(scan_layout)
-        
-        # Progress Bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-        
-        self.status_label = QLabel(tr("dialog.discovery.ready"))
-        layout.addWidget(self.status_label)
-        
-        # Gefundene Kameras Tabelle
-        found_group = QGroupBox(tr("dialog.discovery.found"))
-        found_layout = QVBoxLayout()
-        
-        self.camera_table = QTableWidget()
-        self.camera_table.setColumnCount(7)
-        self.camera_table.setHorizontalHeaderLabels([
-            tr("dialog.discovery.col.select"),
-            tr("dialog.discovery.col.ip"),
-            tr("dialog.discovery.col.name"),
-            tr("dialog.discovery.col.model"),
-            tr("dialog.discovery.col.manufacturer"),
-            tr("dialog.discovery.col.ports"),
-            tr("dialog.discovery.col.uid"),
-        ])
-        self.camera_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.camera_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        
-        found_layout.addWidget(self.camera_table)
-        found_group.setLayout(found_layout)
-        layout.addWidget(found_group)
-        
-        # Dialog Buttons
-        button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-        
-        self.setLayout(layout)
-    
-    def _get_local_network(self):
-        """Lokales Netzwerk ermitteln"""
-        try:
-            # Lokale IP ermitteln
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-            s.close()
-            
-            # Netzwerk-Bereich ableiten (Class C)
-            ip_parts = local_ip.split('.')
-            network = f"{ip_parts[0]}.{ip_parts[1]}.{ip_parts[2]}.0/24"
-            return network
-        except:
-            return "192.168.1.0/24"
-    
-    def start_scan(self):
-        """Scan starten"""
-        network = self.network_input.text().strip()
-        username = self.username_input.text().strip()
-        password = self.password_input.text()
-        
-        if not network:
-            QMessageBox.warning(self, tr("dialog.title.error"), tr("dialog.discovery.err_network"))
-            return
-        
-        # UI anpassen
-        self.scan_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.camera_table.setRowCount(0)
-        self.found_cameras.clear()
-        self.progress_bar.setValue(0)
-        
-        # Discovery Thread starten
-        self.discovery_thread = CameraDiscoveryThread(network, username=username, password=password)
-        self.discovery_thread.camera_found.connect(self.on_camera_found)
-        self.discovery_thread.progress_update.connect(self.on_progress_update)
-        self.discovery_thread.scan_complete.connect(self.on_scan_complete)
-        self.discovery_thread.start()
-    
-    def stop_scan(self):
-        """Scan stoppen"""
-        if self.discovery_thread:
-            self.discovery_thread.stop()
-            self.discovery_thread.wait()
-        
-        self.scan_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.status_label.setText(tr("dialog.discovery.scan_cancelled", count=len(self.found_cameras)))
-    
-    def on_camera_found(self, camera_info):
-        """Kamera zur Tabelle hinzufügen"""
-        self.found_cameras.append(camera_info)
-        
-        row = self.camera_table.rowCount()
-        self.camera_table.insertRow(row)
-        
-        # Checkbox
-        checkbox = QCheckBox()
-        checkbox.setChecked(True)
-        checkbox_widget = QWidget()
-        checkbox_layout = QHBoxLayout(checkbox_widget)
-        checkbox_layout.addWidget(checkbox)
-        checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        checkbox_layout.setContentsMargins(0, 0, 0, 0)
-        self.camera_table.setCellWidget(row, 0, checkbox_widget)
-        
-        # Daten
-        self.camera_table.setItem(row, 1, QTableWidgetItem(camera_info['ip']))
-        self.camera_table.setItem(row, 2, QTableWidgetItem(camera_info['name']))
-        self.camera_table.setItem(row, 3, QTableWidgetItem(camera_info['model']))
-        self.camera_table.setItem(row, 4, QTableWidgetItem(camera_info['manufacturer']))
-        self.camera_table.setItem(row, 5, QTableWidgetItem(', '.join(map(str, camera_info['ports']))))
-        self.camera_table.setItem(row, 6, QTableWidgetItem(camera_info.get('uid', '')))
-    
-    def on_progress_update(self, progress, message):
-        """Progress aktualisieren"""
-        self.progress_bar.setValue(progress)
-        self.status_label.setText(message)
-    
-    def on_scan_complete(self, count):
-        """Scan abgeschlossen"""
-        self.scan_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.progress_bar.setValue(100)
-        self.status_label.setText(tr("dialog.discovery.scan_done", count=count))
-    
-    def get_selected_cameras(self):
-        """Ausgewählte Kameras zurückgeben"""
-        selected = []
-        
-        for row in range(self.camera_table.rowCount()):
-            checkbox_widget = self.camera_table.cellWidget(row, 0)
-            checkbox = checkbox_widget.findChild(QCheckBox)
-            
-            if checkbox and checkbox.isChecked():
-                camera_info = self.found_cameras[row]
-                selected.append(camera_info)
-        
-        return selected
-
-
-class CameraThread(QThread):
-    """Thread für einzelne Kamera mit OpenCV - optimiert für parallele Streams"""
-    frame_ready = pyqtSignal(np.ndarray, int)
-    connection_status = pyqtSignal(bool, int, str)
-    
-    def __init__(self, camera_id, rtsp_url, uid=""):
-        super().__init__()
-        self.camera_id = camera_id
-        # Normalize URL to ensure explicit port (prevents FFmpeg TCP fallback errors)
-        self.rtsp_url = _normalize_rtsp_url(rtsp_url)
-        self.uid = uid
-        self.running = False
-        self.recording = False
-        self.video_writer = None
-        self._writer_lock = threading.Lock()
-        self.cap = None
-        self.reconnect_delay = 5  # Mehr Zeit für Akku-Kameras
-        self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
-        self._is_proxy_stream = self._host in ("localhost", "127.0.0.1") and int(self._port or 0) == 8554
-        
-        # Alternative Pfade (Reolink Fallbacks)
-        self._alt_paths = [
-            "h264Preview_01_main",
-            "h265Preview_01_main",
-            "Preview_01_main",
-            "h264Preview_01_sub",
-            "Preview_01_sub"
-        ]
-        
-    def run(self):
-        """Hauptschleife mit automatischem Retry"""
-        self.running = True
-        
-        while self.running:
-            try:
-                self._connect_and_stream()
-            except Exception as e:
-                self.connection_status.emit(False, self.camera_id, tr("error.prefix", error=str(e)))
-                if self.running:
-                    for _ in range(int(self.reconnect_delay * 10)):
-                        if not self.running:
-                            break
-                        self.msleep(100)
-        
-        self._cleanup()
-    
-    def _connect_and_stream(self):
-        """Verbindung herstellen und streamen"""
-        # Best-effort wake attempt for sleeping/battery cameras
-        if self._host:
-            # Intensiv-Weckphase (für Akku-Kameras wie Argus PT Ultra)
-            # Wir wiederholen das Wecken und prüfen die Erreichbarkeit über mind. 10 Sek.
-            self.connection_status.emit(False, self.camera_id, tr("camera.preview.waiting"))
-            
-            wake_ok = False
-            for attempt in range(10): # 10 Versuche alle ~1s = ca. 10s total
-                if not self.running: break
-                
-                # 1. UDP Wake Burst
-                _udp_reolink_wake(self._host, self.uid)
-                
-                # 2. Optionaler HTTP Ping
-                try: requests.get(f"http://{self._host}:8000/api.cgi?cmd=GetDevInfo", timeout=0.2)
-                except: pass
-                
-                # 3. RTSP Erreichbarkeit prüfen (Port 554)
-                for _ in range(3):
-                    if not self.running: break
-                    ok, _ = _tcp_probe(self._host, int(self._port or 554), timeout=0.2)
-                    if ok:
-                        wake_ok = True
-                        break
-                    time.sleep(0.3)
-                
-                if wake_ok: break
-            
-            if wake_ok:
-                self.connection_status.emit(True, self.camera_id, tr("camera.status.connected")) # Wach!
-                time.sleep(1.0)
-            else:
-                # Auch wenn TCP Probe fehlschlägt, versuchen wir es trotzdem 
-                # (manchen Kameras antworten nicht auf Port-Checks, aber auf echte RTSP-Anfragen)
-                self.connection_status.emit(False, self.camera_id, tr("camera.status.connecting"))
-
-        open_timeout_ms = 12000 if self._is_proxy_stream else 3000
-        read_timeout_ms = 12000 if self._is_proxy_stream else 3000
-
-        # RTSP Stream öffnen (mit Fallback-Pfaden für native Reolink-RTSP-URLs)
-        # Use TCP transport to reduce RTP packet loss warnings
-        self.cap = cv2.VideoCapture(self.rtsp_url, cv2.CAP_FFMPEG, [
-            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_timeout_ms,
-            cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout_ms
-        ])
-        
-        # Falls eine native Kamera nicht öffnet, probieren wir Reolink-typische Varianten.
-        # Bei ReolinkProxy-URLs ist der Pfad absichtlich fix (<Name>/mainStream).
-        if not self.cap.isOpened() and not self._is_proxy_stream:
-            # Parse URL properly to rebuild with alternative paths
-            try:
-                u = urlparse(self.rtsp_url)
-                port = u.port or 554
-                
-                for path in self._alt_paths:
-                    # Use _build_rtsp_url to properly encode credentials
-                    test_url = _build_rtsp_url(
-                        host=u.hostname,
-                        port=port,
-                        username=u.username or '',
-                        password=u.password or '',
-                        path=path,
-                        scheme=u.scheme
-                    )
-                    if test_url == self.rtsp_url:
-                        continue
-                    
-                    self.connection_status.emit(False, self.camera_id, f"Prüfe Pfad: {path}...")
-                    self.cap = cv2.VideoCapture(test_url, cv2.CAP_FFMPEG, [
-                        cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, open_timeout_ms,
-                        cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout_ms
-                    ])
-                    if self.cap.isOpened():
-                        self.rtsp_url = test_url
-                        break
-            except Exception:
-                pass
-        
-        if not self.cap.isOpened():
-            # Diagnostik: Wenn RTSP zu ist, aber Port 8000 offen, ist RTSP wahrscheinlich in der Kamera deaktiviert
-            if self._host and not self._is_proxy_stream:
-                ok_api, _ = _tcp_probe(self._host, 8000, timeout=0.5)
-                if ok_api:
-                    raise Exception("Kamera antwortet auf API (Port 8000), aber RTSP ist blockiert. Bitte 'RTSP' in den Kamera-Einstellungen (Netzwerk -> Fortgeschritten -> Servereinstellungen) aktivieren!")
-            raise Exception(tr("camera.error.stream_unreachable"))
-        
-        # Optimierungen für geringe Latenz
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FPS, 25)
-        
-        self.connection_status.emit(True, self.camera_id, tr("camera.status.connected"))
-        
-        frame_skip = 0
-        skip_interval = 1  # Jedes zweite Frame für CPU-Schonung
-        
-        while self.running:
-            ret, frame = self.cap.read()
-            
-            if not ret:
-                raise Exception(tr("camera.error.stream_interrupted"))
-            
-            # CPU-Schonung: nicht jedes Frame verarbeiten
-            frame_skip += 1
-            if frame_skip % skip_interval == 0:
-                # Frame an UI senden
-                self.frame_ready.emit(frame.copy(), self.camera_id)
-            
-            # Aufzeichnung (alle Frames)
-            with self._writer_lock:
-                if self.recording and self.video_writer is not None:
-                    try:
-                        self.video_writer.write(frame)
-                    except Exception:
-                        # Don't crash the streaming thread due to writer issues.
-                        pass
-            
-            # CPU-Schonung: Kleine Pause
-            self.msleep(33)  # ~30 FPS
-    
-    def _cleanup(self):
-        """Ressourcen freigeben"""
-        if self.cap:
-            self.cap.release()
-            self.cap = None
-        with self._writer_lock:
-            if self.video_writer:
-                self.video_writer.release()
-                self.video_writer = None
-            self.recording = False
-    
-    def start_recording(self, output_path):
-        """Starte Aufzeichnung"""
-        if not (self.cap and self.cap.isOpened()):
-            return None
-
-        with self._writer_lock:
-            if self.recording and self.video_writer is not None:
-                return None
-
-            # Ensure any previous writer is closed before re-opening
-            if self.video_writer is not None:
-                try:
-                    self.video_writer.release()
-                except Exception:
-                    pass
-                self.video_writer = None
-
-            fps = float(self.cap.get(cv2.CAP_PROP_FPS))
-            if not fps or fps <= 0 or fps > 120:
-                fps = 25.0
-            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            if width <= 0 or height <= 0:
-                width, height = 640, 480
-
-            os.makedirs(output_path, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            # Some streams behave badly with MPEG4/XVID timestamping (invalid PTS).
-            # MJPG-in-AVI is usually more tolerant.
-            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            filename = os.path.join(output_path, f"camera_{self.camera_id}_{timestamp}.avi")
-
-            vw = cv2.VideoWriter(filename, fourcc, fps, (width, height))
-            if not vw.isOpened():
-                return None
-
-            self.video_writer = vw
-            self.recording = True
-            return filename
-        return None
-    
-    def stop_recording(self):
-        """Stoppe Aufzeichnung"""
-        with self._writer_lock:
-            self.recording = False
-            if self.video_writer:
-                try:
-                    self.video_writer.release()
-                except Exception:
-                    pass
-                self.video_writer = None
-    
-    def request_stop(self):
-        """Signal the stream loop to stop.
-
-        OpenCV/FFmpeg can abort if VideoCapture is released from a different
-        thread while open/read is active. The stream thread owns cleanup.
-        """
-        self.running = False
-        self.stop_recording()
-
-    def stop(self, timeout_ms=2000, force=False):
-        """Thread stoppen"""
-        self.request_stop()
-        if not self.wait(timeout_ms):
-            return False
-        return True
-
-
-class CameraWidget(QWidget):
-    """Widget für einzelne Kamera-Anzeige"""
-    clicked = pyqtSignal(int)
-    stream_toggled = pyqtSignal(int, bool)
-    snapshot_requested = pyqtSignal(int)
-    selection_changed = pyqtSignal(int, bool)
-
-    def __init__(self, camera_id, camera_name="", is_battery=False):
-        super().__init__()
-        self.camera_id = camera_id
-        self.camera_name = camera_name or tr("camera.default_name.id", id=camera_id)
-        self.is_battery = is_battery
-        self.recording = False
-        self.last_frame_time = datetime.now()
-        self.stream_active = False
-        self.last_frame = None
-        self._drag_start_pos = None
-        self._video_drag_start_pos = None
-        self._video_dragging = False
-        self.is_selected_for_view = False
-        
-        layout = QVBoxLayout()
-        layout.setContentsMargins(2, 2, 2, 2)
-        layout.setSpacing(4)
-        
-        # Checkbox für Multi-Kamera-Auswahl
-        checkbox_layout = QHBoxLayout()
-        checkbox_layout.setContentsMargins(4, 2, 4, 2)
-        self.view_checkbox = QCheckBox("✓")
-        self.view_checkbox.setToolTip("Kamera in großer Ansicht anzeigen")
-        self.view_checkbox.setStyleSheet("""
-            QCheckBox {
-                font-weight: bold;
-                font-size: 10px;
-                color: #4CAF50;
-            }
-            QCheckBox::indicator {
-                width: 14px;
-                height: 14px;
-                border: 2px solid #4CAF50;
-                border-radius: 2px;
-                background-color: #2b2b2b;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4CAF50;
-                border-color: #4CAF50;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #66BB6A;
-            }
-        """)
-        self.view_checkbox.stateChanged.connect(self._on_checkbox_changed)
-        checkbox_layout.addWidget(self.view_checkbox)
-        checkbox_layout.addStretch()
-        layout.addLayout(checkbox_layout)
-        
-        # Video Label
-        self.video_label = QLabel()
-        self.video_label.setFixedSize(180, 120)
-        border_color = "#ff9800" if is_battery else "#555"
-        self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
-        self.video_label.setScaledContents(False)
-        self.video_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        self.video_label.mousePressEvent = self._on_video_mouse_press
-        self.video_label.mouseMoveEvent = self._on_video_mouse_move
-        self.video_label.mouseReleaseEvent = self._on_video_mouse_release
-        
-        # Info Label mit FPS und Battery-Indikator
-        battery_indicator = f" {tr('battery.indicator')}" if is_battery else ""
-        self.info_label = QLabel(f"{self.camera_name}{battery_indicator} - {tr('camera.status.offline')}")
-        label_color = "#ff9800" if is_battery else "red"
-        self.info_label.setStyleSheet(f"color: {label_color}; font-weight: bold; font-size: 11px;")
-        self.info_label.setWordWrap(False)
-        self.info_label.setFixedHeight(18)
-        
-        # Button Layout
-        btn_layout = QHBoxLayout()
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(4)
-        
-        icon_size = QSize(18, 18)
-
-        # Aufnahme Button
-        self.record_btn = QPushButton()
-        self.record_btn.setCheckable(True)
-        self.record_btn.setEnabled(False)
-        self.record_btn.setMaximumWidth(40)
-        self.record_btn.setFixedHeight(24)
-        self.record_btn.setIcon(load_svg_icon("record.svg"))
-        self.record_btn.setIconSize(icon_size)
-        self.record_btn.setToolTip(tr("camera.tooltip.record"))
-        self.record_btn.clicked.connect(self.toggle_recording)
-
-        self.stream_btn = QPushButton()
-        self.stream_btn.setCheckable(True)
-        self.stream_btn.setMaximumWidth(40)
-        self.stream_btn.setFixedHeight(24)
-        self.stream_btn.setIcon(load_svg_icon("play.svg"))
-        self.stream_btn.setIconSize(icon_size)
-        self.stream_btn.setToolTip(tr("camera.tooltip.stream"))
-        self.stream_btn.clicked.connect(self.toggle_stream)
-
-        self.snapshot_btn = QPushButton()
-        self.snapshot_btn.setMaximumWidth(40)
-        self.snapshot_btn.setFixedHeight(24)
-        self.snapshot_btn.setIcon(load_svg_icon("camera.svg"))
-        self.snapshot_btn.setIconSize(icon_size)
-        self.snapshot_btn.setToolTip(tr("camera.tooltip.snapshot"))
-        self.snapshot_btn.clicked.connect(self._request_snapshot)
-        
-        # Edit Button
-        self.edit_btn = QPushButton()
-        self.edit_btn.setMaximumWidth(40)
-        self.edit_btn.setFixedHeight(24)
-        self.edit_btn.setToolTip(tr("camera.tooltip.edit"))
-        self.edit_btn.setIcon(load_svg_icon("pencil.svg"))
-        self.edit_btn.setIconSize(icon_size)
-        self.edit_btn.setStyleSheet("color: #64b5f6;")
-        
-        # Entfernen Button
-        self.remove_btn = QPushButton()
-        self.remove_btn.setMaximumWidth(40)
-        self.remove_btn.setFixedHeight(24)
-        self.remove_btn.setToolTip(tr("camera.tooltip.remove"))
-        self.remove_btn.setIcon(load_svg_icon("trash.svg"))
-        self.remove_btn.setIconSize(icon_size)
-        self.remove_btn.setStyleSheet("color: #999;")
-        
-        btn_layout.addWidget(self.stream_btn)
-        btn_layout.addWidget(self.record_btn)
-        btn_layout.addWidget(self.snapshot_btn)
-        btn_layout.addWidget(self.edit_btn)
-        btn_layout.addWidget(self.remove_btn)
-        btn_layout.addStretch()
-        
-        layout.addWidget(self.video_label)
-        layout.addWidget(self.info_label)
-        layout.addLayout(btn_layout)
-        
-        self.setLayout(layout)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumWidth(200)
-        self.setFixedHeight(120 + 18 + 24 + 16 + 24)
-
-        self.set_selected(False)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_start_pos = event.pos()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            super().mouseMoveEvent(event)
-            return
-
-        if self._drag_start_pos is None:
-            super().mouseMoveEvent(event)
-            return
-
-        if (event.pos() - self._drag_start_pos).manhattanLength() < 8:
-            super().mouseMoveEvent(event)
-            return
-
-        mime = QMimeData()
-        mime.setData("application/x-wildcam-camera-id", str(self.camera_id).encode("utf-8"))
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
-
-        self._drag_start_pos = None
-        super().mouseMoveEvent(event)
-    
-    def _on_video_clicked(self, event):
-        self.clicked.emit(self.camera_id)
-
-    def _on_video_mouse_press(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._video_drag_start_pos = event.pos()
-            self._video_dragging = False
-
-    def _on_video_mouse_move(self, event):
-        if not (event.buttons() & Qt.MouseButton.LeftButton):
-            return
-
-        if self._video_drag_start_pos is None:
-            return
-
-        if (event.pos() - self._video_drag_start_pos).manhattanLength() < 8:
-            return
-
-        if self._video_dragging:
-            return
-
-        self._video_dragging = True
-        mime = QMimeData()
-        mime.setData("application/x-wildcam-camera-id", str(self.camera_id).encode("utf-8"))
-        drag = QDrag(self)
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
-
-    def _on_video_mouse_release(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            if not self._video_dragging:
-                self._on_video_clicked(event)
-            self._video_drag_start_pos = None
-            self._video_dragging = False
-
-    def update_frame(self, frame):
-        """Frame aktualisieren mit FPS-Berechnung"""
-        self.last_frame = frame
-        if self.is_selected_for_view:
-            return
-
-        # FPS berechnen
-        now = datetime.now()
-        fps = 1.0 / (now - self.last_frame_time).total_seconds() if (now - self.last_frame_time).total_seconds() > 0 else 0
-        self.last_frame_time = now
-        
-        # Resize für Display
-        display_w = max(1, self.video_label.width())
-        display_h = max(1, self.video_label.height())
-        frame_resized = cv2.resize(frame, (display_w, display_h))
-        
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-        
-        # Aufnahme-Indikator
-        if self.recording:
-            cv2.circle(rgb_frame, (20, 20), 8, (255, 0, 0), -1)
-            cv2.putText(rgb_frame, "REC", (35, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-        
-        # FPS anzeigen
-        cv2.putText(rgb_frame, f"{fps:.1f} FPS", (display_w - 80, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
-        # Convert to QImage
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        
-        self.video_label.setPixmap(QPixmap.fromImage(qt_image))
-    
-    def update_status(self, connected, message):
-        """Status aktualisieren"""
-        if connected:
-            self.info_label.setText(f"{self.camera_name} - {message}")
-            self.info_label.setStyleSheet("color: green; font-weight: bold; font-size: 11px;")
-            self.record_btn.setEnabled(True)
-        else:
-            self.info_label.setText(f"{self.camera_name} - {message}")
-            self.info_label.setStyleSheet("color: red; font-weight: bold; font-size: 11px;")
-            self.record_btn.setEnabled(False)
-            if self.stream_active:
-                self.video_label.setText(f"{self.camera_name}\n{message}\n{tr('camera.preview.retrying')}")
-            else:
-                self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
-    
-    def toggle_recording(self):
-        """Aufnahme umschalten"""
-        self.recording = self.record_btn.isChecked()
-        if self.recording:
-            self.record_btn.setStyleSheet("background-color: #d32f2f; color: white; font-weight: bold;")
-        else:
-            self.record_btn.setStyleSheet("")
-
-    def toggle_stream(self):
-        self.stream_active = self.stream_btn.isChecked()
-        if self.stream_active:
-            self.stream_btn.setIcon(load_svg_icon("stop.svg"))
-        else:
-            self.stream_btn.setIcon(load_svg_icon("play.svg"))
-        self.stream_toggled.emit(self.camera_id, self.stream_active)
-
-    def set_stream_active(self, active):
-        self.stream_active = active
-        self.stream_btn.blockSignals(True)
-        self.stream_btn.setChecked(active)
-        self.stream_btn.setIcon(load_svg_icon("stop.svg") if active else load_svg_icon("play.svg"))
-        self.stream_btn.blockSignals(False)
-        if not active:
-            self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
-
-    def retranslate_ui(self):
-        self.record_btn.setToolTip(tr("camera.tooltip.record"))
-        self.stream_btn.setToolTip(tr("camera.tooltip.stream"))
-        self.snapshot_btn.setToolTip(tr("camera.tooltip.snapshot"))
-        self.edit_btn.setToolTip(tr("camera.tooltip.edit"))
-        self.remove_btn.setToolTip(tr("camera.tooltip.remove"))
-        if not self.stream_active:
-            self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
-
-    def _request_snapshot(self):
-        self.snapshot_requested.emit(self.camera_id)
-
-    def _on_checkbox_changed(self, state):
-        self.is_selected_for_view = (state == Qt.CheckState.Checked.value)
-        if self.is_selected_for_view:
-            self.video_label.setPixmap(QPixmap())
-            self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.waiting')}")
-        self.selection_changed.emit(self.camera_id, self.is_selected_for_view)
-    
-    def set_selected(self, selected):
-        if selected:
-            self.video_label.setStyleSheet("border: 2px solid #4CAF50; background-color: black;")
-        else:
-            border_color = "#ff9800" if self.is_battery else "#555"
-            self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
-
-
-class PreviewLabel(QLabel):
-    clicked = pyqtSignal(int)
-    double_clicked = pyqtSignal(int)
-    region_selected = pyqtSignal(int, QRect)
-
-    def __init__(self, camera_id=None, parent=None):
-        super().__init__(parent)
-        self.camera_id = camera_id
-        self._selection_enabled = False
-        self._selection_origin = None
-        self._selection_rect = QRect()
-        self._frame_display_rect = QRect()
-
-    def set_selection_enabled(self, enabled: bool):
-        self._selection_enabled = bool(enabled)
-        self.setCursor(
-            Qt.CursorShape.CrossCursor if self._selection_enabled else Qt.CursorShape.ArrowCursor
-        )
-        if not self._selection_enabled:
-            self.clear_selection()
-
-    def clear_selection(self):
-        if not self._selection_rect.isNull():
-            self._selection_rect = QRect()
-            self.update()
-        self._selection_origin = None
-
-    def set_frame_display_rect(self, rect: QRect):
-        self._frame_display_rect = QRect(rect)
-
-    def clear_frame_display_rect(self):
-        self._frame_display_rect = QRect()
-        self.clear_selection()
-
-    def frame_display_rect(self) -> QRect:
-        return QRect(self._frame_display_rect)
-
-    def sizeHint(self):
-        return QSize(0, 0)
-
-    def minimumSizeHint(self):
-        return QSize(0, 0)
-
-    def mousePressEvent(self, event):
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self.camera_id is not None
-            and self._selection_enabled
-        ):
-            pos = event.position().toPoint()
-            if self._frame_display_rect.contains(pos):
-                self._selection_origin = pos
-                self._selection_rect = QRect(pos, pos)
-                self.update()
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if self._selection_enabled and self._selection_origin is not None:
-            pos = event.position().toPoint()
-            self._selection_rect = QRect(self._selection_origin, pos).normalized()
-            self.update()
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._selection_origin is not None:
-            selection_rect = QRect(self._selection_origin, event.position().toPoint()).normalized()
-            selection_rect = selection_rect.intersected(self._frame_display_rect)
-            self.clear_selection()
-            if (
-                self.camera_id is not None
-                and selection_rect.width() >= 8
-                and selection_rect.height() >= 8
-            ):
-                self.region_selected.emit(int(self.camera_id), selection_rect)
-                event.accept()
-                return
-        super().mouseReleaseEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self.camera_id is not None:
-            self.clear_selection()
-            self.double_clicked.emit(int(self.camera_id))
-        super().mouseDoubleClickEvent(event)
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        if self._selection_rect.isNull():
-            return
-
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        painter.setPen(QPen(QColor(76, 175, 80), 2))
-        painter.fillRect(self._selection_rect, QColor(76, 175, 80, 45))
-        painter.drawRect(self._selection_rect)
 
 
 class MainWindow(QMainWindow):
@@ -1907,8 +69,8 @@ class MainWindow(QMainWindow):
         self.cameras = []
         self.camera_threads = {}  # Dict für parallele Thread-Verwaltung
         self.camera_widgets = {}  # Dict für Widget-Zugriff
-        self.recording_path = os.path.expanduser("~/Videos/Reolink")
-        self.snapshot_path = os.path.join(self.recording_path, "snapshots")
+        self.recording_path = DEFAULT_RECORDING_PATH
+        self.snapshot_path = snapshot_path_for(self.recording_path)
         self.cameras_per_row = 3  # Standard: 3 Kameras pro Reihe
         self.next_camera_id = 1
         self.selected_camera_id = None
@@ -1919,7 +81,6 @@ class MainWindow(QMainWindow):
         self.preview_crop_camera_id = None
         self.preview_crop_rect = None
         self._rebuilding_camera_list = False
-        self._pending_order_apply = False
         self._closing = False
         self._shutdown_started_at = None
         self._shutdown_dialog = None
@@ -2277,11 +438,95 @@ class MainWindow(QMainWindow):
         self.camera_widgets[camera_id] = widget
         return widget
 
+    def _remove_camera_list_item(self, camera_id: int):
+        if not hasattr(self, "camera_list_container"):
+            return
+        layout = self.camera_list_container.layout_ref
+        for index in range(layout.count()):
+            item = layout.itemAt(index)
+            widget = item.widget() if item else None
+            if widget is not None and getattr(widget, "camera_id", None) == camera_id:
+                layout.takeAt(index)
+                widget.setParent(None)
+                return
+
     def _on_record_btn_clicked(self, camera_id: int, widget: CameraWidget, checked: bool):
         thread = self.camera_threads.get(camera_id)
         if thread is None:
             return
         self.toggle_camera_recording(thread, widget, checked)
+
+    def _allocate_camera_id(self) -> int:
+        camera_id = self.next_camera_id
+        self.next_camera_id += 1
+        return camera_id
+
+    def _add_camera_entry(self, camera_entry: dict):
+        self.cameras.append(camera_entry)
+        self._get_or_create_camera_widget(camera_entry)
+
+    def _build_discovered_camera_entry(self, camera_info: dict, username: str, password: str) -> dict:
+        rtsp_port = 554 if 554 in camera_info['ports'] else (
+            8554 if 8554 in camera_info['ports'] else 554
+        )
+        camera_entry = {
+            'id': self._allocate_camera_id(),
+            'url': _build_rtsp_url(
+                host=camera_info['ip'],
+                port=rtsp_port,
+                username=username,
+                password=password,
+                path="h264Preview_01_main"
+            ),
+            'name': camera_info['name'],
+            'uid': camera_info.get('uid', ''),
+            'model': camera_info.get('model', ''),
+            'manufacturer': camera_info.get('manufacturer', '')
+        }
+        normalize_reolinkproxy_camera(camera_entry, username=username, password=password)
+        return camera_entry
+
+    def _build_manual_camera_entry(self, url: str, name: str, uid: str) -> dict:
+        camera_id = self._allocate_camera_id()
+        camera_entry = {
+            'id': camera_id,
+            'url': url,
+            'name': name if name else tr("camera.default_name.id", id=camera_id),
+            'uid': uid,
+            'model': ''
+        }
+        normalize_reolinkproxy_camera(camera_entry)
+        return camera_entry
+
+    def _normalize_edited_camera_data(self, camera_data: dict, updated_data: dict) -> dict:
+        normalized = dict(updated_data)
+        normalized.setdefault('model', camera_data.get('model', ''))
+        normalized.setdefault('manufacturer', camera_data.get('manufacturer', ''))
+        normalize_reolinkproxy_camera(normalized)
+        return normalized
+
+    def _start_camera_thread(self, camera: dict) -> CameraThread:
+        camera_id = camera['id']
+        thread = CameraThread(camera_id, camera['url'], camera.get('uid', ''))
+        thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
+        thread.connection_status.connect(lambda connected, cid, msg: self.update_camera_status(connected, cid, msg))
+        thread.start()
+        self.camera_threads[camera_id] = thread
+        if camera_id in self.camera_widgets:
+            self.camera_widgets[camera_id].set_stream_active(True)
+        return thread
+
+    def _clear_big_preview_label(self, text: str = ""):
+        self.big_preview_label.setPixmap(QPixmap())
+        self.big_preview_label.clear_frame_display_rect()
+        if text:
+            self.big_preview_label.setText(text)
+
+    def _camera_waiting_text(self, camera_name: str) -> str:
+        return f"{camera_name}\n{tr('camera.preview.waiting')}"
+
+    def _camera_click_to_start_text(self, camera_name: str) -> str:
+        return f"{camera_name}\n{tr('camera.preview.click_to_start')}"
     
     def show_discovery_dialog(self):
         """Kamera-Suche Dialog anzeigen"""
@@ -2301,79 +546,20 @@ class MainWindow(QMainWindow):
             battery_cameras = []
             
             for camera_info in selected_cameras:
-                ip = camera_info['ip']
                 name = camera_info['name']
                 model = camera_info.get('model', '')
-                manufacturer = camera_info.get('manufacturer', '')
                 
                 # Check if battery camera
                 if _is_battery_camera(model, name):
                     battery_cameras.append((name, model))
-                
-                # RTSP Port bestimmen
-                rtsp_port = 554 if 554 in camera_info['ports'] else (
-                    8554 if 8554 in camera_info['ports'] else 554
-                )
-                
-                # RTSP URL generieren (Reolink Standard) mit URL-Encoding für Sonderzeichen
-                rtsp_url = _build_rtsp_url(
-                    host=ip,
-                    port=rtsp_port,
-                    username=username,
-                    password=password,
-                    path="h264Preview_01_main"
-                )
 
-                proxy_config = _reolinkproxy_proxy_config(
-                    rtsp_url=rtsp_url,
-                    name=name,
-                    username=username,
-                    password=password,
-                    uid=camera_info.get('uid', ''),
-                    model=model,
-                    manufacturer=manufacturer
-                )
-
-                # Reolink WLAN/Battery: automatisch auf ReolinkProxy umstellen
-                rtsp_url = _maybe_use_reolinkproxy(
-                    rtsp_url=rtsp_url,
-                    name=name,
-                    username=username,
-                    password=password,
-                    uid=camera_info.get('uid', ''),
-                    model=model,
-                    manufacturer=manufacturer
-                )
+                camera_entry = self._build_discovered_camera_entry(camera_info, username, password)
                 
                 # Prüfe ob Kamera bereits existiert
-                if any(c['url'] == rtsp_url for c in self.cameras):
+                if any(c['url'] == camera_entry['url'] for c in self.cameras):
                     continue
-                
-                # Kamera hinzufügen
-                camera_id = self.next_camera_id
-                self.next_camera_id += 1
-                
-                camera_entry = {
-                    'id': camera_id,
-                    'url': rtsp_url,
-                    'name': name,
-                    'uid': camera_info.get('uid', ''),
-                    'model': model,
-                    'manufacturer': manufacturer
-                }
-                if proxy_config:
-                    camera_entry['proxy'] = proxy_config
-                self.cameras.append(camera_entry)
-                
-                # Widget erstellen
-                is_battery = _is_battery_camera(model, name)
-                widget = CameraWidget(camera_id, name, is_battery=is_battery)
-                widget.remove_btn.clicked.connect(lambda checked, cid=camera_id: self.remove_camera(cid))
-                widget.edit_btn.clicked.connect(lambda checked, cid=camera_id: self.edit_camera(cid))
-                widget.stream_toggled.connect(self.toggle_camera_stream)
-                widget.clicked.connect(self.select_camera)
-                widget.snapshot_requested.connect(self.save_camera_snapshot)
-                self.camera_widgets[camera_id] = widget
+
+                self._add_camera_entry(camera_entry)
                 
                 added_count += 1
             
@@ -2405,10 +591,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, tr("dialog.title.error"), tr("label.rtsp_url"))
             return
         
-        camera_id = self.next_camera_id
-        self.next_camera_id += 1
-        
-        camera_name = name if name else tr("camera.default_name.id", id=camera_id)
+        camera_name = name if name else tr("camera.default_name.id", id=self.next_camera_id)
         
         # Check if battery camera and show warning
         if _is_battery_camera("", camera_name):
@@ -2422,44 +605,9 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.No:
                 return
 
-        proxy_config = _reolinkproxy_proxy_config(
-            rtsp_url=url,
-            name=camera_name,
-            username="",
-            password="",
-            uid=uid
-        )
-
-        # Reolink WLAN/Battery (Port 9000) automatisch auf ReolinkProxy umstellen
-        url = _maybe_use_reolinkproxy(
-            rtsp_url=url,
-            name=camera_name,
-            username="",
-            password="",
-            uid=uid
-        )
-        
-        # Kamera zur Liste hinzufügen
-        camera_entry = {
-            'id': camera_id, 
-            'url': url, 
-            'name': camera_name,
-            'uid': uid,
-            'model': ''  # Model info not available from manual add
-        }
-        if proxy_config:
-            camera_entry['proxy'] = proxy_config
-        self.cameras.append(camera_entry)
-        
-        # Widget erstellen
-        is_battery = _is_battery_camera('', camera_name)
-        widget = CameraWidget(camera_id, camera_name, is_battery=is_battery)
-        widget.remove_btn.clicked.connect(lambda: self.remove_camera(camera_id))
-        widget.edit_btn.clicked.connect(lambda: self.edit_camera(camera_id))
-        widget.clicked.connect(self.select_camera)
-        widget.stream_toggled.connect(self.toggle_camera_stream)
-        widget.snapshot_requested.connect(self.save_camera_snapshot)
-        self.camera_widgets[camera_id] = widget
+        camera_entry = self._build_manual_camera_entry(url, name, uid)
+        self._add_camera_entry(camera_entry)
+        camera_name = camera_entry['name']
         
         # Im Grid platzieren
         self.update_grid_layout()
@@ -2496,30 +644,7 @@ class MainWindow(QMainWindow):
         dialog = CameraEditDialog(camera_data, self)
         
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            updated_data = dialog.get_camera_data()
-
-            proxy_config = _reolinkproxy_proxy_config(
-                rtsp_url=updated_data.get('url', ''),
-                name=updated_data.get('name', ''),
-                username="",
-                password="",
-                uid=updated_data.get('uid', ''),
-                model=camera_data.get('model', ''),
-                manufacturer=camera_data.get('manufacturer', '')
-            )
-
-            # Reolink WLAN/Battery (Port 9000) automatisch auf ReolinkProxy umstellen
-            updated_data['url'] = _maybe_use_reolinkproxy(
-                rtsp_url=updated_data.get('url', ''),
-                name=updated_data.get('name', ''),
-                username="",
-                password="",
-                uid=updated_data.get('uid', ''),
-                model=camera_data.get('model', ''),
-                manufacturer=camera_data.get('manufacturer', '')
-            )
-            if proxy_config:
-                updated_data['proxy'] = proxy_config
+            updated_data = self._normalize_edited_camera_data(camera_data, dialog.get_camera_data())
             
             # Daten aktualisieren
             for camera in self.cameras:
@@ -2533,15 +658,15 @@ class MainWindow(QMainWindow):
                 widget.camera_name = updated_data['name']
                 widget.info_label.setText(f"{updated_data['name']} - {tr('camera.status.offline')}")
                 if widget.stream_active:
-                    widget.video_label.setText(f"{updated_data['name']}\n{tr('camera.preview.waiting')}")
+                    widget.video_label.setText(self._camera_waiting_text(updated_data['name']))
                 else:
-                    widget.video_label.setText(f"{updated_data['name']}\n{tr('camera.preview.click_to_start')}")
+                    widget.video_label.setText(self._camera_click_to_start_text(updated_data['name']))
 
             if self.selected_camera_id == camera_id:
                 if camera_id in self.camera_threads and self.camera_threads[camera_id].isRunning():
-                    self.big_preview_label.setText(f"{updated_data['name']}\n{tr('camera.preview.waiting')}")
+                    self.big_preview_label.setText(self._camera_waiting_text(updated_data['name']))
                 else:
-                    self.big_preview_label.setText(f"{updated_data['name']}\n{tr('camera.preview.click_to_start')}")
+                    self.big_preview_label.setText(self._camera_click_to_start_text(updated_data['name']))
             
             self.save_config()
             self.statusBar().showMessage(tr("status.camera_updated", name=updated_data['name']))
@@ -2568,25 +693,7 @@ class MainWindow(QMainWindow):
             self.camera_widgets[camera_id].record_btn.setChecked(False)
             self.camera_widgets[camera_id].toggle_recording()
         
-        # Neuen Thread erstellen
-        thread = CameraThread(camera_id, camera['url'], camera.get('uid', ''))
-        
-        # Signals verbinden
-        thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
-        thread.connection_status.connect(lambda connected, cid, msg: self.update_camera_status(connected, cid, msg))
-        
-        # Aufnahme-Button verbinden
-        if camera_id in self.camera_widgets:
-            widget = self.camera_widgets[camera_id]
-            widget.record_btn.clicked.connect(
-                lambda checked, t=thread, w=widget: self.toggle_camera_recording(t, w, checked)
-            )
-        
-        # Thread starten
-        thread.start()
-        self.camera_threads[camera_id] = thread
-        if camera_id in self.camera_widgets:
-            self.camera_widgets[camera_id].set_stream_active(True)
+        self._start_camera_thread(camera)
         self.statusBar().showMessage(tr("status.stream_started", name=camera['name']))
 
     def stop_single_stream(self, camera_id):
@@ -2609,11 +716,9 @@ class MainWindow(QMainWindow):
             widget.update_status(False, tr("camera.status.stopped"))
 
         if self.selected_camera_id == camera_id:
-            self.big_preview_label.setPixmap(QPixmap())
-            self.big_preview_label.clear_frame_display_rect()
             widget = self.camera_widgets.get(camera_id)
             if widget:
-                self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.click_to_start')}")
+                self._clear_big_preview_label(self._camera_click_to_start_text(widget.camera_name))
 
     def toggle_camera_stream(self, camera_id, enabled):
         if enabled:
@@ -2660,9 +765,7 @@ class MainWindow(QMainWindow):
             self.selected_camera_id = None
             if self.preview_crop_camera_id == camera_id:
                 self._clear_big_preview_crop()
-            self.big_preview_label.setPixmap(QPixmap())
-            self.big_preview_label.clear_frame_display_rect()
-            self.big_preview_label.setText(tr("big.select_camera"))
+            self._clear_big_preview_label(tr("big.select_camera"))
 
         if camera_id in self.selected_camera_ids:
             self.selected_camera_ids.remove(camera_id)
@@ -2725,9 +828,7 @@ class MainWindow(QMainWindow):
             self.selected_camera_ids = []
             self.zoomed_camera_id = None
             self._clear_big_preview_crop()
-            self.big_preview_label.setPixmap(QPixmap())
-            self.big_preview_label.clear_frame_display_rect()
-            self.big_preview_label.setText(tr("big.select_camera"))
+            self._clear_big_preview_label(tr("big.select_camera"))
             if hasattr(self, "camera_list_container"):
                 layout = self.camera_list_container.layout_ref
                 while layout.count():
@@ -2753,19 +854,7 @@ class MainWindow(QMainWindow):
             if camera_id in self.camera_threads and self.camera_threads[camera_id].isRunning():
                 continue
             
-            # Neuen Thread erstellen
-            thread = CameraThread(camera_id, camera['url'], camera.get('uid', ''))
-            
-            # Signals verbinden
-            thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
-            thread.connection_status.connect(lambda connected, cid, msg: self.update_camera_status(connected, cid, msg))
-            
-            # Thread starten (parallel)
-            thread.start()
-            self.camera_threads[camera_id] = thread
-
-            if camera_id in self.camera_widgets:
-                self.camera_widgets[camera_id].set_stream_active(True)
+            self._start_camera_thread(camera)
         
         self.statusBar().showMessage(tr("status.streams_starting", count=len(self.cameras)))
     
@@ -2806,9 +895,7 @@ class MainWindow(QMainWindow):
         if self.selected_camera_id is not None:
             widget = self.camera_widgets.get(self.selected_camera_id)
             if widget:
-                self.big_preview_label.setPixmap(QPixmap())
-                self.big_preview_label.clear_frame_display_rect()
-                self.big_preview_label.setText(f"{widget.camera_name}\n{tr('camera.preview.click_to_start')}")
+                self._clear_big_preview_label(self._camera_click_to_start_text(widget.camera_name))
         self._update_big_preview_selection_state()
 
         self.update_status_display()
@@ -2891,7 +978,7 @@ class MainWindow(QMainWindow):
         path = QFileDialog.getExistingDirectory(self, tr("dialog.path.choose"), self.recording_path)
         if path:
             self.recording_path = path
-            self.snapshot_path = os.path.join(self.recording_path, "snapshots")
+            self.snapshot_path = snapshot_path_for(self.recording_path)
             os.makedirs(self.snapshot_path, exist_ok=True)
             self.save_config()
             self.statusBar().showMessage(tr("status.path", path=path))
@@ -2915,169 +1002,48 @@ class MainWindow(QMainWindow):
     
     def save_config(self):
         """Konfiguration speichern"""
-        config = {
-            'cameras': self.cameras,
-            'recording_path': self.recording_path,
-            'cameras_per_row': self.cameras_per_row,
-            'next_camera_id': self.next_camera_id,
-            'language': self.language,
-            'order_custom': self._order_custom,
-            'preview_camera_ids': list(self.selected_camera_ids),
-            'selected_camera_id': self.selected_camera_id,
-        }
         try:
-            with open('camera_config.json', 'w') as f:
-                json.dump(config, f, indent=2)
+            save_config_data(config_payload(self))
         except Exception as e:
             print(f"Fehler beim Speichern: {e}")
     
     def load_config(self):
         """Konfiguration laden"""
         try:
-            with open('camera_config.json', 'r') as f:
-                config = json.load(f)
-                self.language = config.get('language', self.language)
-                set_language(self.language)
-                loaded_cameras = config.get('cameras', [])
-                fixed_config = False
+            config, fixed_config = load_config_data()
+            if config is None:
+                return
 
-                # Deduplicate IDs: duplicate IDs lead to widget reuse, gaps, and crashes.
-                used_ids = set()
-                max_id = 0
-                for c in loaded_cameras:
-                    try:
-                        cid = int(c.get('id'))
-                    except Exception:
-                        cid = None
-                    if cid is not None:
-                        max_id = max(max_id, cid)
+            self.language = config.get('language', self.language)
+            set_language(self.language)
+            self.cameras = config.get('cameras', [])
+            self.recording_path = config.get('recording_path', self.recording_path)
+            self.snapshot_path = config.get('snapshot_path', snapshot_path_for(self.recording_path))
+            self.cameras_per_row = config.get('cameras_per_row', 3)
+            self._restore_preview_camera_ids = config.get('preview_camera_ids', [])
+            self.selected_camera_id = config.get('selected_camera_id')
+            self._order_custom = bool(config.get('order_custom', False))
+            self.next_camera_id = config.get('next_camera_id', 1)
 
-                deduped = []
-                for c in loaded_cameras:
-                    try:
-                        cid = int(c.get('id'))
-                    except Exception:
-                        cid = None
+            self.grid_cols_spin.setValue(self.cameras_per_row)
+            if hasattr(self, "language_combo"):
+                idx = self.language_combo.findData(self.language)
+                if idx >= 0:
+                    self.language_combo.blockSignals(True)
+                    self.language_combo.setCurrentIndex(idx)
+                    self.language_combo.blockSignals(False)
 
-                    if cid is None:
-                        max_id += 1
-                        c['id'] = max_id
-                        used_ids.add(max_id)
-                        deduped.append(c)
-                        fixed_config = True
-                        continue
+            for camera in self.cameras:
+                widget = self._get_or_create_camera_widget(camera)
+                widget.retranslate_ui()
 
-                    if cid in used_ids:
-                        max_id += 1
-                        c['id'] = max_id
-                        used_ids.add(max_id)
-                        deduped.append(c)
-                        fixed_config = True
-                    else:
-                        used_ids.add(cid)
-                        deduped.append(c)
+            self.update_grid_layout()
+            self.update_status_display()
+            self.retranslate_ui()
+            self._restore_preview_state()
 
-                # Deduplicate by URL as well (older drag&drop/config corruption could
-                # duplicate entire camera entries).
-                seen_urls = set()
-                deduped_by_url = []
-                for c in deduped:
-                    url = (c.get('url') or '').strip()
-                    if not url:
-                        deduped_by_url.append(c)
-                        continue
-                    if url in seen_urls:
-                        fixed_config = True
-                        continue
-                    seen_urls.add(url)
-                    # UID explizit sicherstellen (falls vorhanden)
-                    if 'uid' not in c:
-                        c['uid'] = ''
-                        fixed_config = True # Sorgen wir dafür, dass es gespeichert wird
-                    deduped_by_url.append(c)
-
-                # Reolink WLAN/Baichuan URLs beim Laden automatisch auf ReolinkProxy umstellen
-                for c in deduped_by_url:
-                    url = (c.get('url') or '').strip()
-                    if not url:
-                        continue
-                    proxy_config = _reolinkproxy_proxy_config(
-                        rtsp_url=url,
-                        name=c.get('name', ''),
-                        username="",
-                        password="",
-                        uid=c.get('uid', ''),
-                        model=c.get('model', ''),
-                        manufacturer=c.get('manufacturer', '')
-                    )
-                    new_url = _maybe_use_reolinkproxy(
-                        rtsp_url=url,
-                        name=c.get('name', ''),
-                        username="",
-                        password="",
-                        uid=c.get('uid', ''),
-                        model=c.get('model', ''),
-                        manufacturer=c.get('manufacturer', '')
-                    )
-                    if new_url != url:
-                        c['url'] = new_url
-                        fixed_config = True
-                    if proxy_config and not c.get('proxy'):
-                        c['proxy'] = proxy_config
-                        fixed_config = True
-
-                self.cameras = deduped_by_url
-                self.recording_path = config.get('recording_path', self.recording_path)
-                self.snapshot_path = os.path.join(self.recording_path, "snapshots")
-                self.cameras_per_row = config.get('cameras_per_row', 3)
-                valid_camera_ids = {int(c.get('id')) for c in self.cameras if c.get('id') is not None}
-                preview_ids = []
-                for cid in config.get('preview_camera_ids', []):
-                    try:
-                        cid = int(cid)
-                    except Exception:
-                        continue
-                    if cid in valid_camera_ids and cid not in preview_ids:
-                        preview_ids.append(cid)
-                self._restore_preview_camera_ids = preview_ids
-                try:
-                    selected_camera_id = int(config.get('selected_camera_id')) if config.get('selected_camera_id') is not None else None
-                except Exception:
-                    selected_camera_id = None
-                self.selected_camera_id = selected_camera_id if selected_camera_id in valid_camera_ids else None
-                self._order_custom = bool(config.get('order_custom', False))
-                if not self._order_custom:
-                    try:
-                        self.cameras.sort(key=lambda c: int(c.get('id', 0)))
-                    except Exception:
-                        pass
-                repaired_next_id = max([c.get('id', 0) for c in self.cameras] + [0]) + 1
-                if config.get('next_camera_id') != repaired_next_id:
-                    fixed_config = True
-                self.next_camera_id = repaired_next_id
-                
-                self.grid_cols_spin.setValue(self.cameras_per_row)
-                if hasattr(self, "language_combo"):
-                    idx = self.language_combo.findData(self.language)
-                    if idx >= 0:
-                        self.language_combo.blockSignals(True)
-                        self.language_combo.setCurrentIndex(idx)
-                        self.language_combo.blockSignals(False)
-                
-                # Widgets erstellen
-                for camera in self.cameras:
-                    widget = self._get_or_create_camera_widget(camera)
-                    widget.retranslate_ui()
-                
-                self.update_grid_layout()
-                self.update_status_display()
-                self.retranslate_ui()
-                self._restore_preview_state()
-
-                if fixed_config:
-                    self.save_config()
-        except FileNotFoundError:
-            pass
+            if fixed_config:
+                self.save_config()
         except Exception as e:
             print(f"Fehler beim Laden: {e}")
     
@@ -3313,6 +1279,32 @@ class MainWindow(QMainWindow):
         for cid in self.selected_camera_ids:
             if cid not in self.camera_threads or not self.camera_threads[cid].isRunning():
                 self.start_single_stream(cid)
+
+    def _create_multi_view_close_button(self, camera_id, label):
+        close_btn = QPushButton()
+        close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+        close_btn.setIconSize(QSize(14, 14))
+        close_btn.setFixedSize(28, 28)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(220, 53, 69, 220);
+                border: 2px solid white;
+                border-radius: 14px;
+            }
+            QPushButton:hover {
+                background-color: rgba(200, 35, 51, 255);
+                border: 2px solid #ffcccc;
+            }
+        """)
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(lambda checked, cid=camera_id: self._close_multi_view_camera(cid))
+        close_btn.setParent(label)
+        close_btn.raise_()
+        if not hasattr(self, 'multi_view_close_buttons'):
+            self.multi_view_close_buttons = {}
+        self.multi_view_close_buttons[camera_id] = close_btn
+        label.installEventFilter(self)
+        return close_btn
     
     def _rebuild_multi_view_layout(self):
         """Rebuild the big preview layout based on selected cameras"""
@@ -3360,29 +1352,7 @@ class MainWindow(QMainWindow):
             self.big_preview_label = label
             self.multi_view_labels[camera_id] = label
 
-            close_btn = QPushButton()
-            close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
-            close_btn.setIconSize(QSize(14, 14))
-            close_btn.setFixedSize(28, 28)
-            close_btn.setStyleSheet("""
-                QPushButton {
-                    background-color: rgba(220, 53, 69, 220);
-                    border: 2px solid white;
-                    border-radius: 14px;
-                }
-                QPushButton:hover {
-                    background-color: rgba(200, 35, 51, 255);
-                    border: 2px solid #ffcccc;
-                }
-            """)
-            close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            close_btn.clicked.connect(lambda checked, cid=camera_id: self._close_multi_view_camera(cid))
-            close_btn.setParent(label)
-            close_btn.raise_()
-            if not hasattr(self, 'multi_view_close_buttons'):
-                self.multi_view_close_buttons = {}
-            self.multi_view_close_buttons[camera_id] = close_btn
-            label.installEventFilter(self)
+            self._create_multi_view_close_button(camera_id, label)
         else:
             # Multi-camera grid view
             # Calculate grid: 2 cameras = 1 row x 2 cols, 3-4 = 2 rows, 5-6 = 3 rows, etc.
@@ -3392,9 +1362,6 @@ class MainWindow(QMainWindow):
             for row in range(rows):
                 row_layout = QHBoxLayout()
                 row_layout.setSpacing(4)
-                
-                # Calculate how many cameras in this row
-                cameras_in_row = min(cols, num_selected - row * cols)
                 
                 # No left spacer - single camera should be on left side
                 
@@ -3431,36 +1398,7 @@ class MainWindow(QMainWindow):
                     if widget:
                         label.setText(f"{widget.camera_name}\n{tr('camera.preview.waiting')}")
                     
-                    # Close button overlay (top-right)
-                    close_btn = QPushButton()
-                    close_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
-                    close_btn.setIconSize(QSize(14, 14))
-                    close_btn.setFixedSize(28, 28)
-                    close_btn.setStyleSheet("""
-                        QPushButton {
-                            background-color: rgba(220, 53, 69, 220);
-                            border: 2px solid white;
-                            border-radius: 14px;
-                        }
-                        QPushButton:hover {
-                            background-color: rgba(200, 35, 51, 255);
-                            border: 2px solid #ffcccc;
-                        }
-                    """)
-                    close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-                    close_btn.clicked.connect(lambda checked, cid=camera_id: self._close_multi_view_camera(cid))
-                    
-                    # Position close button at top-right - will be repositioned on resize
-                    close_btn.setParent(label)
-                    close_btn.raise_()
-                    
-                    # Store button reference for repositioning
-                    if not hasattr(self, 'multi_view_close_buttons'):
-                        self.multi_view_close_buttons = {}
-                    self.multi_view_close_buttons[camera_id] = close_btn
-                    
-                    # Install event filter to reposition button on resize
-                    label.installEventFilter(self)
+                    self._create_multi_view_close_button(camera_id, label)
                     
                     container_layout.addWidget(label)
                     row_layout.addWidget(container, 1)
@@ -3628,6 +1566,7 @@ class MainWindow(QMainWindow):
             and self.preview_crop_rect is None
             and self.preview_crop_camera_id is None
         )
+
 
 
 def main():

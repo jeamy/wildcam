@@ -5,46 +5,32 @@ ReolinkProxy Manager fuer WildCam.
 Generiert reolinkproxy.env ausschliesslich aus camera_config.json.
 """
 import json
-import re
 import sys
 from pathlib import Path
-from urllib.parse import urlparse, unquote
+
+from camera_utils import (
+    _parse_rtsp_url,
+    _reolinkproxy_camera_name,
+    _reolinkproxy_proxy_config,
+    _reolinkproxy_rtsp_url,
+)
 
 
 def parse_rtsp_url(rtsp_url):
-    try:
-        u = urlparse(rtsp_url, allow_fragments=False)
-        if not u.hostname and "#" in rtsp_url:
-            u = urlparse(rtsp_url.replace("#", "%23"), allow_fragments=False)
-        if u.hostname:
-            return {
-                "host": u.hostname,
-                "port": u.port or 554,
-                "username": unquote(u.username or ""),
-                "password": unquote(u.password or ""),
-                "scheme": u.scheme,
-            }
-    except Exception:
-        pass
-
-    try:
-        pattern = r"^[a-z]+://(?:([^:@/]+)(?::([^@/]*))?@)?([^:/]+)(?::(\d+))?"
-        match = re.match(pattern, rtsp_url, re.IGNORECASE)
-        if not match:
-            return None
-        return {
-            "host": match.group(3),
-            "port": int(match.group(4) or 554),
-            "username": unquote(match.group(1) or ""),
-            "password": unquote(match.group(2) or ""),
-            "scheme": "rtsp",
-        }
-    except Exception:
+    host, port, username, password = _parse_rtsp_url(rtsp_url or "")
+    if not host:
         return None
+    return {
+        "host": host,
+        "port": port,
+        "username": username or "",
+        "password": password or "",
+        "scheme": "rtsp",
+    }
 
 
 def camera_name(name):
-    return (name or "Camera").strip().replace(" ", "_")
+    return _reolinkproxy_camera_name(name)
 
 
 def is_proxy_url(rtsp_url):
@@ -70,22 +56,15 @@ def env_value(value):
 
 
 def make_proxy_from_rtsp(camera):
-    info = parse_rtsp_url(camera.get("url", ""))
-    if not info or is_proxy_url(camera.get("url", "")):
-        return None
-
-    return {
-        "type": "reolinkproxy",
-        "host": info["host"],
-        "port": info["port"],
-        "username": info["username"],
-        "password": info["password"],
-        "stream": "main",
-        "battery": True,
-        "pause_on_client": True,
-        "idle_disconnect": True,
-        "idle_timeout": "30s",
-    }
+    return _reolinkproxy_proxy_config(
+        rtsp_url=camera.get("url", ""),
+        name=camera.get("name", ""),
+        username="",
+        password="",
+        uid=camera.get("uid", ""),
+        model=camera.get("model", ""),
+        manufacturer=camera.get("manufacturer", ""),
+    )
 
 
 def write_env(cameras, output_path):
@@ -172,7 +151,7 @@ def update_camera_config(camera_config_path):
             if proxy:
                 cam["proxy"] = proxy
                 updated = True
-        new_url = f"rtsp://localhost:8554/{name}/mainStream"
+        new_url = _reolinkproxy_rtsp_url(name)
         if cam.get("url") != new_url:
             print(f"{cam.get('name', name)}: {cam.get('url')} -> {new_url}")
             cam["url"] = new_url
