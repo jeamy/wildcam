@@ -20,7 +20,9 @@
 ### Current module layout
 
 - `main.py`
-  - `MainWindow`, app startup, high-level UI orchestration
+  - application startup only
+- `main_window.py`
+  - `MainWindow`, high-level UI orchestration
 - `widgets.py`
   - `CameraListContainer`, `CameraWidget`, `PreviewLabel`
 - `dialogs.py`
@@ -44,7 +46,7 @@
 
 Use packages only when the flat module layout becomes hard to navigate. A reasonable target would be:
 
-- `app.py` or `main.py`
+- `main.py`
   - application start only
 - `ui/`
   - `main_window.py`, `widgets.py`, `dialogs.py`, `resources.py`
@@ -58,14 +60,17 @@ Use packages only when the flat module layout becomes hard to navigate. A reason
 ### Migration strategy 
 
 - [x] Extract config load/save/repair into `config.py`
+- [x] Move `MainWindow` into `main_window.py`
 - [x] Move reusable UI classes into `widgets.py`
 - [x] Move dialogs into `dialogs.py`
 - [x] Move worker threads / background logic into `stream.py` and `discovery.py`
 - [x] Move RTSP/ReolinkProxy helpers into `camera_utils.py`
 - [ ] Consider package directories (`ui/`, `services/`, `core/`) only if modules keep growing
-- [ ] After each extraction:
-  - [ ] Run the app
-  - [ ] Verify core flows (stream start/stop, recording, snapshot, discovery, config persistence)
+- [x] After extraction:
+  - [x] Run `ruff check .`
+  - [x] Run Python compile/import checks
+  - [ ] Run the GUI app
+  - [ ] Manually verify core flows (stream start/stop, recording, snapshot, discovery, config persistence)
 
 ### Notes / pitfalls
 
