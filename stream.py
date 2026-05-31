@@ -38,6 +38,8 @@ class CameraThread(QThread):
         self.reconnect_delay = 5  # Mehr Zeit für Akku-Kameras
         self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
         self._is_proxy_stream = self._host in ("localhost", "127.0.0.1") and int(self._port or 0) == 8554
+        if self._is_proxy_stream:
+            self.reconnect_delay = 2
         
         # Alternative Pfade (Reolink Fallbacks)
         self._alt_paths = [
@@ -142,8 +144,8 @@ class CameraThread(QThread):
                 # (manchen Kameras antworten nicht auf Port-Checks, aber auf echte RTSP-Anfragen)
                 self.connection_status.emit(False, self.camera_id, tr("camera.status.connecting"))
 
-        open_timeout_ms = 12000 if self._is_proxy_stream else 3000
-        read_timeout_ms = 5000 if self._is_proxy_stream else 3000
+        open_timeout_ms = 20000 if self._is_proxy_stream else 3000
+        read_timeout_ms = 10000 if self._is_proxy_stream else 3000
 
         # RTSP Stream öffnen (mit Fallback-Pfaden für native Reolink-RTSP-URLs)
         # Use TCP transport to reduce RTP packet loss warnings
@@ -188,14 +190,15 @@ class CameraThread(QThread):
         
         # Optimierungen für geringe Latenz
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FPS, 25)
+        if not self._is_proxy_stream:
+            self.cap.set(cv2.CAP_PROP_FPS, 25)
         
         self.connection_status.emit(True, self.camera_id, tr("camera.status.connected"))
         
-        frame_skip = 0
-        skip_interval = 1  # Jedes zweite Frame für CPU-Schonung
+        last_ui_emit = 0.0
+        ui_emit_interval = 1.0 / (15 if self._is_proxy_stream else 25)
         failed_reads = 0
-        max_failed_reads = 3
+        max_failed_reads = 4 if self._is_proxy_stream else 3
         
         while self.running:
             ret, frame = self.cap.read()
@@ -204,16 +207,15 @@ class CameraThread(QThread):
                 failed_reads += 1
                 if failed_reads >= max_failed_reads:
                     raise Exception(tr("camera.error.stream_interrupted"))
-                self.msleep(200)
+                self.msleep(500 if self._is_proxy_stream else 200)
                 continue
 
             failed_reads = 0
             
-            # CPU-Schonung: nicht jedes Frame verarbeiten
-            frame_skip += 1
-            if frame_skip % skip_interval == 0:
-                # Frame an UI senden
+            now = time.monotonic()
+            if now - last_ui_emit >= ui_emit_interval:
                 self.frame_ready.emit(frame.copy(), self.camera_id)
+                last_ui_emit = now
             
             # Aufzeichnung (alle Frames)
             with self._writer_lock:
@@ -224,8 +226,7 @@ class CameraThread(QThread):
                         # Don't crash the streaming thread due to writer issues.
                         pass
             
-            # CPU-Schonung: Kleine Pause
-            self.msleep(33)  # ~30 FPS
+            self.msleep(5 if self._is_proxy_stream else 10)
     
     def _cleanup(self):
         """Ressourcen freigeben"""
