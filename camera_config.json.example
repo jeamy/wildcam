@@ -21,6 +21,7 @@
     }
   ],
   "recording_path": "~/Videos/Reolink",
+  "model_dir": "~/Videos/Reolink/models"
   "detection": {
     "model": "yolo11n.pt",
     "imgsz": 640,
