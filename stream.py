@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -33,7 +34,13 @@ class CameraThread(QThread):
         self.running = False
         self.recording = False
         self.video_writer = None
+        self.event_writer = None
+        self._event_clip_filename = None
+        self._event_clip_until = 0.0
         self._writer_lock = threading.Lock()
+        self._buffer_lock = threading.Lock()
+        self._frame_buffer = deque()
+        self._frame_buffer_seconds = 12.0
         self.cap = None
         self.reconnect_delay = 5  # Mehr Zeit für Akku-Kameras
         self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
@@ -211,6 +218,7 @@ class CameraThread(QThread):
                 continue
 
             failed_reads = 0
+            self._remember_frame(frame)
             
             now = time.monotonic()
             if now - last_ui_emit >= ui_emit_interval:
@@ -225,13 +233,40 @@ class CameraThread(QThread):
                     except Exception:
                         # Don't crash the streaming thread due to writer issues.
                         pass
+                if self.event_writer is not None:
+                    try:
+                        self.event_writer.write(frame)
+                    except Exception:
+                        pass
+                    if time.monotonic() >= self._event_clip_until:
+                        self._release_event_writer_locked()
             
             self.msleep(5 if self._is_proxy_stream else 10)
+
+    def _remember_frame(self, frame):
+        now = time.monotonic()
+        with self._buffer_lock:
+            self._frame_buffer.append((now, frame.copy()))
+            cutoff = now - self._frame_buffer_seconds
+            while self._frame_buffer and self._frame_buffer[0][0] < cutoff:
+                self._frame_buffer.popleft()
     
     def _cleanup(self):
         """Ressourcen freigeben"""
         self._release_capture()
         self._release_writer()
+        with self._writer_lock:
+            self._release_event_writer_locked()
+
+    def _release_event_writer_locked(self):
+        if self.event_writer:
+            try:
+                self.event_writer.release()
+            except Exception:
+                pass
+        self.event_writer = None
+        self._event_clip_filename = None
+        self._event_clip_until = 0.0
     
     def start_recording(self, output_path):
         """Starte Aufzeichnung"""
@@ -274,6 +309,54 @@ class CameraThread(QThread):
             self.recording = True
             return filename
         return None
+
+    def start_event_clip(self, output_path, label: str, pre_seconds: float = 8.0, post_seconds: float = 20.0):
+        """Start a short event clip from the rolling frame buffer plus future frames."""
+        if not (self.cap and self.cap.isOpened()):
+            return None
+
+        with self._writer_lock:
+            now = time.monotonic()
+            if self.event_writer is not None and now < self._event_clip_until:
+                self._event_clip_until = max(self._event_clip_until, now + max(1.0, float(post_seconds)))
+                return self._event_clip_filename
+
+            with self._buffer_lock:
+                buffered = [
+                    frame
+                    for frame_time, frame in self._frame_buffer
+                    if frame_time >= now - max(0.0, float(pre_seconds))
+                ]
+
+            fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+            if not fps or fps <= 0 or fps > 120:
+                fps = 25.0
+            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            if (width <= 0 or height <= 0) and buffered:
+                height, width = buffered[-1].shape[:2]
+            if width <= 0 or height <= 0:
+                width, height = 640, 480
+
+            os.makedirs(output_path, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_label = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(label))
+            filename = os.path.join(output_path, f"event_{self.camera_id}_{safe_label}_{timestamp}.avi")
+
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            vw = cv2.VideoWriter(filename, fourcc, fps, (width, height))
+            if not vw.isOpened():
+                return None
+
+            for frame in buffered:
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, (width, height))
+                vw.write(frame)
+
+            self.event_writer = vw
+            self._event_clip_filename = filename
+            self._event_clip_until = now + max(1.0, float(post_seconds))
+            return filename
     
     def stop_recording(self):
         """Stoppe Aufzeichnung"""

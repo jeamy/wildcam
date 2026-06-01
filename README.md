@@ -14,7 +14,22 @@
 - **Recording & snapshots**
   - Default recordings folder: `~/Videos/Reolink`
   - Snapshots are stored in `~/Videos/Reolink/snapshots`
+- **Object detection alerts**
+  - Uses Ultralytics YOLO when installed
+  - Automatically selects CUDA when PyTorch detects an NVIDIA GPU, otherwise CPU
+  - Can be enabled per camera from the camera tile
+  - Saves annotated detection snapshots and short event clips
+  - Can send optional SMTP email alerts with the detection image attached
+  - Includes a settings-page test mail button for SMTP checks
 - **UI language switch** (German/English), stored in `camera_config.json`
+
+## License
+
+WildCam is licensed under **AGPL-3.0-or-later**. The object detection
+integration uses Ultralytics YOLO, whose default open-source license is
+AGPL-3.0. If you distribute modified versions or run a network-accessible
+modified version, make the corresponding source available as required by the
+AGPL.
 
 ## Requirements
 
@@ -29,6 +44,7 @@ If you install dependencies via your distro packages (recommended in Docker/mana
 - OpenCV (`cv2`)
 - NumPy
 - requests
+- Ultralytics YOLO / PyTorch for object detection
 
 ## Run
 
@@ -38,6 +54,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python3 main.py
 ```
+
+`./start_wildcam.sh` activates `.venv`/`venv` automatically. If no virtual
+environment exists, it creates `.venv`; before starting WildCam it runs
+`python3 -m pip install -r requirements.txt` so missing packages are installed.
 
 ## Configure Cameras
 
@@ -115,9 +135,18 @@ Then edit `camera_config.json` and replace IPs / usernames / passwords.
   - **`id`** must be unique.
   - **`url`** is the RTSP URL.
   - **`name`** is the display name.
+  - **`detection_enabled`** enables object detection for that camera.
   - **`proxy`** is optional and contains ReolinkProxy connection settings for battery/WLAN cameras.
 - **`recording_path`**
   - Target directory for recordings.
+- **`detection`**
+  - Object detection settings.
+  - `device: "auto"` uses CUDA when available and falls back to CPU.
+  - Event snapshots are saved below `snapshots`.
+  - Event clips are saved below `events`.
+- **`email`**
+  - Optional SMTP alert settings.
+  - Disabled by default.
 - **`next_camera_id`**
   - Internal counter for assigning new IDs.
 - **`language`**
@@ -151,10 +180,73 @@ Example snippet:
     }
   ],
   "recording_path": "/home/USER/Videos/Reolink",
+  "detection": {
+    "model": "yolo11n.pt",
+    "imgsz": 640,
+    "confidence": 0.4,
+    "device": "auto",
+    "analysis_fps_per_camera": 3.0,
+    "stable_frames": 2,
+    "cooldown_seconds": 180,
+    "pre_event_seconds": 8,
+    "post_event_seconds": 20,
+    "classes": ["person", "car", "truck", "dog", "cat", "bird"]
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "use_tls": true,
+    "from": "",
+    "to": []
+  },
   "next_camera_id": 2,
   "language": "de",
   "order_custom": false
 }
+```
+
+## Object Detection
+
+Detection is controlled through `camera_config.json` and each camera tile's
+`AI` button.
+The default model is `yolo11n.pt`, which is a small, fast model suitable for
+multi-camera testing. For a GTX 1660 Ti, start with:
+
+```json
+"analysis_fps_per_camera": 3.0,
+"imgsz": 640,
+"model": "yolo11n.pt"
+```
+
+When an object is detected for `stable_frames` consecutive analysis frames and
+the per-camera/per-class `cooldown_seconds` has elapsed, WildCam:
+
+- saves an annotated JPEG snapshot in `~/Videos/Reolink/snapshots`
+- starts an AVI event clip in `~/Videos/Reolink/events`
+- sends an email with the image attached if `email.enabled` is `true`
+
+Pretrained COCO classes include `person`, vehicles, and common animals such as
+`dog`, `cat`, `bird`, `horse`, `sheep`, and `cow`. Wild animals such as deer,
+foxes, or boars usually need a custom fine-tuned model for reliable alerts.
+
+Release builds include the Python detection libraries. YOLO model weights are
+resolved by Ultralytics from the configured model name/path, so the first run
+must either be able to download the model or point `detection.model` to a local
+weights file.
+
+The **Download/test model** button stores known YOLO weights in:
+
+```text
+<recording_path>/models
+```
+
+For the default path this is:
+
+```text
+~/Videos/Reolink/models
 ```
 
 ### Add camera manually

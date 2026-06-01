@@ -46,6 +46,11 @@ if (Test-Path $buildDir) { Remove-Item $buildDir -Recurse -Force }
   --collect-all "PyQt6" `
   --collect-all "cv2" `
   --collect-all "numpy" `
+  --collect-all "ultralytics" `
+  --collect-all "torch" `
+  --collect-all "torchvision" `
+  --hidden-import "detection" `
+  --hidden-import "notifications" `
   $EntryPoint
 
 $bundlePath = Join-Path $distDir $AppName

@@ -64,6 +64,11 @@ rm -rf "$DIST_DIR" "$BUILD_DIR"
   --collect-all "PyQt6" \
   --collect-all "cv2" \
   --collect-all "numpy" \
+  --collect-all "ultralytics" \
+  --collect-all "torch" \
+  --collect-all "torchvision" \
+  --hidden-import "detection" \
+  --hidden-import "notifications" \
   "$ENTRY_POINT"
 
 BUNDLE_PATH="$DIST_DIR/$APP_NAME"
