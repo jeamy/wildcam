@@ -5,6 +5,7 @@
       "url": "rtsp://localhost:8554/Eingang/mainStream",
       "name": "Eingang",
       "uid": "9527000000000000",
+      "detection_enabled": false,
       "proxy": {
         "type": "reolinkproxy",
         "host": "192.168.1.100",
@@ -20,6 +21,42 @@
     }
   ],
   "recording_path": "~/Videos/Reolink",
+  "model_dir": "~/Videos/Reolink/models"
+  "detection": {
+    "model": "yolo11n.pt",
+    "imgsz": 640,
+    "confidence": 0.4,
+    "device": "auto",
+    "analysis_fps_per_camera": 3.0,
+    "stable_frames": 2,
+    "cooldown_seconds": 180,
+    "pre_event_seconds": 8,
+    "post_event_seconds": 20,
+    "classes": [
+      "person",
+      "bicycle",
+      "car",
+      "motorcycle",
+      "bus",
+      "truck",
+      "bird",
+      "cat",
+      "dog",
+      "horse",
+      "sheep",
+      "cow"
+    ]
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "",
+    "smtp_port": 587,
+    "smtp_username": "",
+    "smtp_password": "",
+    "use_tls": true,
+    "from": "",
+    "to": []
+  },
   "cameras_per_row": 3,
   "next_camera_id": 2,
   "language": "de",

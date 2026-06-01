@@ -9,6 +9,25 @@ cd "$SCRIPT_DIR"
 echo "🎥 WildCam Startup"
 echo "=================================="
 
+PYTHON_BIN="${PYTHON_BIN:-python3.12}"
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+fi
+
+# Aktiviere/erstelle venv und stelle sicher, dass Requirements installiert sind.
+if [ -d ".venv" ]; then
+    source .venv/bin/activate
+elif [ -d "venv" ]; then
+    source venv/bin/activate
+else
+    echo "🐍 .venv nicht gefunden - erstelle virtuelle Umgebung..."
+    "$PYTHON_BIN" -m venv .venv
+    source .venv/bin/activate
+fi
+
+echo "📦 Prüfe Python-Pakete..."
+python3 -m pip install -r requirements.txt
+
 # Prüfe ob camera_config.json existiert
 if [ ! -f "camera_config.json" ]; then
     echo "⚠️  camera_config.json nicht gefunden!"
@@ -61,13 +80,6 @@ echo ""
 echo "=================================="
 echo "🚀 Starte WildCam..."
 echo ""
-
-# Prüfe ob venv existiert
-if [ -d ".venv" ]; then
-    source .venv/bin/activate
-elif [ -d "venv" ]; then
-    source venv/bin/activate
-fi
 
 # Starte Anwendung
 python3 main.py "$@"

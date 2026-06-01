@@ -2,6 +2,8 @@ import json
 import os
 
 from camera_utils import normalize_reolinkproxy_camera
+from detection import DEFAULT_DETECTION_CONFIG
+from notifications import DEFAULT_EMAIL_CONFIG
 
 
 CONFIG_PATH = "camera_config.json"
@@ -13,9 +15,13 @@ def snapshot_path_for(recording_path: str) -> str:
 
 
 def config_payload(window) -> dict:
+    detection_config = dict(window.detection_config)
+    detection_config.pop("enabled", None)
     return {
         "cameras": window.cameras,
         "recording_path": window.recording_path,
+        "detection": detection_config,
+        "email": window.email_config,
         "cameras_per_row": window.cameras_per_row,
         "next_camera_id": window.next_camera_id,
         "language": window.language,
@@ -73,6 +79,9 @@ def _dedupe_by_url(cameras: list[dict]) -> tuple[list[dict], bool]:
             seen_urls.add(url)
         if "uid" not in camera:
             camera["uid"] = ""
+            fixed = True
+        if "detection_enabled" not in camera:
+            camera["detection_enabled"] = False
             fixed = True
         deduped.append(camera)
     return deduped, fixed
@@ -135,6 +144,8 @@ def load_config_data(path: str = CONFIG_PATH) -> tuple[dict | None, bool]:
         "cameras": cameras,
         "recording_path": raw_config.get("recording_path", DEFAULT_RECORDING_PATH),
         "snapshot_path": snapshot_path_for(raw_config.get("recording_path", DEFAULT_RECORDING_PATH)),
+        "detection": {**DEFAULT_DETECTION_CONFIG, **raw_config.get("detection", {})},
+        "email": {**DEFAULT_EMAIL_CONFIG, **raw_config.get("email", {})},
         "cameras_per_row": raw_config.get("cameras_per_row", 3),
         "next_camera_id": next_camera_id,
         "language": raw_config.get("language", "de"),

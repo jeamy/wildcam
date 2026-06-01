@@ -94,6 +94,7 @@ class CameraWidget(QWidget):
     stream_toggled = pyqtSignal(int, bool)
     snapshot_requested = pyqtSignal(int)
     selection_changed = pyqtSignal(int, bool)
+    detection_toggled = pyqtSignal(int, bool)
 
     def __init__(self, camera_id, camera_name="", is_battery=False):
         super().__init__()
@@ -108,6 +109,7 @@ class CameraWidget(QWidget):
         self._video_drag_start_pos = None
         self._video_dragging = False
         self.is_selected_for_view = False
+        self.detection_active = False
         
         layout = QVBoxLayout()
         layout.setContentsMargins(2, 2, 2, 2)
@@ -147,8 +149,7 @@ class CameraWidget(QWidget):
         # Video Label
         self.video_label = QLabel()
         self.video_label.setFixedSize(180, 120)
-        border_color = "#ff9800" if is_battery else "#555"
-        self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
+        self._apply_video_border_style()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
         self.video_label.setScaledContents(False)
@@ -166,9 +167,15 @@ class CameraWidget(QWidget):
         self.info_label.setFixedHeight(18)
         
         # Button Layout
-        btn_layout = QHBoxLayout()
+        btn_layout = QVBoxLayout()
         btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.setSpacing(4)
+        btn_layout.setSpacing(3)
+        btn_row1 = QHBoxLayout()
+        btn_row1.setContentsMargins(0, 0, 0, 0)
+        btn_row1.setSpacing(4)
+        btn_row2 = QHBoxLayout()
+        btn_row2.setContentsMargins(0, 0, 0, 0)
+        btn_row2.setSpacing(4)
         
         icon_size = QSize(18, 18)
 
@@ -199,6 +206,14 @@ class CameraWidget(QWidget):
         self.snapshot_btn.setIconSize(icon_size)
         self.snapshot_btn.setToolTip(tr("camera.tooltip.snapshot"))
         self.snapshot_btn.clicked.connect(self._request_snapshot)
+
+        self.detection_btn = QPushButton()
+        self.detection_btn.setCheckable(True)
+        self.detection_btn.setMaximumWidth(40)
+        self.detection_btn.setFixedHeight(24)
+        self.detection_btn.setText("AI")
+        self.detection_btn.setToolTip(tr("camera.tooltip.detection"))
+        self.detection_btn.clicked.connect(self.toggle_detection)
         
         # Edit Button
         self.edit_btn = QPushButton()
@@ -218,12 +233,16 @@ class CameraWidget(QWidget):
         self.remove_btn.setIconSize(icon_size)
         self.remove_btn.setStyleSheet("color: #999;")
         
-        btn_layout.addWidget(self.stream_btn)
-        btn_layout.addWidget(self.record_btn)
-        btn_layout.addWidget(self.snapshot_btn)
-        btn_layout.addWidget(self.edit_btn)
-        btn_layout.addWidget(self.remove_btn)
-        btn_layout.addStretch()
+        btn_row1.addWidget(self.stream_btn)
+        btn_row1.addWidget(self.record_btn)
+        btn_row1.addWidget(self.snapshot_btn)
+        btn_row1.addStretch()
+        btn_row2.addWidget(self.detection_btn)
+        btn_row2.addWidget(self.edit_btn)
+        btn_row2.addWidget(self.remove_btn)
+        btn_row2.addStretch()
+        btn_layout.addLayout(btn_row1)
+        btn_layout.addLayout(btn_row2)
         
         layout.addWidget(self.video_label)
         layout.addWidget(self.info_label)
@@ -232,7 +251,7 @@ class CameraWidget(QWidget):
         self.setLayout(layout)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMinimumWidth(200)
-        self.setFixedHeight(120 + 18 + 24 + 16 + 24)
+        self.setFixedHeight(120 + 18 + 24 + 24 + 22 + 24)
 
         self.set_selected(False)
 
@@ -356,6 +375,10 @@ class CameraWidget(QWidget):
         else:
             self.record_btn.setStyleSheet("")
 
+    def toggle_detection(self):
+        self.set_detection_active(self.detection_btn.isChecked())
+        self.detection_toggled.emit(self.camera_id, self.detection_active)
+
     def toggle_stream(self):
         self.stream_active = self.stream_btn.isChecked()
         if self.stream_active:
@@ -377,6 +400,7 @@ class CameraWidget(QWidget):
         self.record_btn.setToolTip(tr("camera.tooltip.record"))
         self.stream_btn.setToolTip(tr("camera.tooltip.stream"))
         self.snapshot_btn.setToolTip(tr("camera.tooltip.snapshot"))
+        self.detection_btn.setToolTip(tr("camera.tooltip.detection"))
         self.edit_btn.setToolTip(tr("camera.tooltip.edit"))
         self.remove_btn.setToolTip(tr("camera.tooltip.remove"))
         if not self.stream_active:
@@ -393,11 +417,28 @@ class CameraWidget(QWidget):
         self.selection_changed.emit(self.camera_id, self.is_selected_for_view)
     
     def set_selected(self, selected):
-        if selected:
-            self.video_label.setStyleSheet("border: 2px solid #4CAF50; background-color: black;")
+        self.is_selected = bool(selected)
+        self._apply_video_border_style()
+
+    def set_detection_active(self, active: bool):
+        self.detection_active = bool(active)
+        self.detection_btn.blockSignals(True)
+        self.detection_btn.setChecked(self.detection_active)
+        self.detection_btn.blockSignals(False)
+        if self.detection_active:
+            self.detection_btn.setStyleSheet("background-color: #1976d2; color: white; font-weight: bold;")
+        else:
+            self.detection_btn.setStyleSheet("")
+        self._apply_video_border_style()
+
+    def _apply_video_border_style(self):
+        if self.detection_active:
+            border_color = "#2196f3"
+        elif getattr(self, "is_selected", False):
+            border_color = "#4CAF50"
         else:
             border_color = "#ff9800" if self.is_battery else "#555"
-            self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
+        self.video_label.setStyleSheet(f"border: 2px solid {border_color}; background-color: black;")
 
 
 class PreviewLabel(QLabel):
@@ -496,4 +537,3 @@ class PreviewLabel(QLabel):
         painter.setPen(QPen(QColor(76, 175, 80), 2))
         painter.fillRect(self._selection_rect, QColor(76, 175, 80, 45))
         painter.drawRect(self._selection_rect)
-

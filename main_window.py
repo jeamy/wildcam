@@ -8,9 +8,12 @@ os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|loglevel;quiet
 
 import cv2
 import numpy as np
+import threading
 from PyQt6.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDialog,
+    QDoubleSpinBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -29,7 +32,7 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QImage, QPixmap
 from datetime import datetime
 import time
@@ -40,8 +43,10 @@ from camera_utils import (
     normalize_reolinkproxy_camera,
 )
 from config import DEFAULT_RECORDING_PATH, config_payload, load_config_data, save_config_data, snapshot_path_for
+from detection import DEFAULT_DETECTION_CONFIG, DetectionWorker, default_model_dir, prepare_model_path
 from dialogs import CameraDiscoveryDialog, CameraEditDialog
 from i18n import set_language, tr
+from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
 from stream import CameraThread
 from ui_resources import load_svg_icon
 from widgets import CameraListContainer, CameraWidget, PreviewLabel
@@ -57,6 +62,9 @@ except Exception:  # pragma: no cover
 
 class MainWindow(QMainWindow):
     """Hauptfenster der Anwendung"""
+    email_test_finished = pyqtSignal(bool, str)
+    model_test_finished = pyqtSignal(bool, str, str)
+
     def __init__(self):
         super().__init__()
         self.language = "de"
@@ -69,6 +77,13 @@ class MainWindow(QMainWindow):
         self.camera_widgets = {}  # Dict für Widget-Zugriff
         self.recording_path = DEFAULT_RECORDING_PATH
         self.snapshot_path = snapshot_path_for(self.recording_path)
+        self.event_path = os.path.join(self.recording_path, "events")
+        self.detection_config = dict(DEFAULT_DETECTION_CONFIG)
+        self.email_config = dict(DEFAULT_EMAIL_CONFIG)
+        self.detection_worker = None
+        self._model_retry_delays = [30, 120, 300]
+        self._model_retry_attempt = 0
+        self._model_retry_scheduled = False
         self.cameras_per_row = 3  # Standard: 3 Kameras pro Reihe
         self.next_camera_id = 1
         self.selected_camera_id = None
@@ -83,10 +98,13 @@ class MainWindow(QMainWindow):
         self._shutdown_started_at = None
         self._shutdown_dialog = None
         self._order_custom = False
+        self.email_test_finished.connect(self._on_email_test_finished)
+        self.model_test_finished.connect(self._on_model_test_finished)
         
         # Erstelle Aufzeichnungsordner
         os.makedirs(self.recording_path, exist_ok=True)
         os.makedirs(self.snapshot_path, exist_ok=True)
+        os.makedirs(self.event_path, exist_ok=True)
         
         self.init_ui()
         self.load_config()
@@ -191,6 +209,8 @@ class MainWindow(QMainWindow):
         
         config_group.setLayout(config_layout)
         config_tab_layout.addWidget(config_group)
+        config_tab_layout.addWidget(self._create_detection_config_group())
+        config_tab_layout.addWidget(self._create_email_config_group())
         config_tab_layout.addStretch()
         
         # Control Panel
@@ -221,7 +241,7 @@ class MainWindow(QMainWindow):
         self.record_all_btn.setIcon(load_svg_icon("record.svg"))
         self.record_all_btn.setIconSize(QSize(18, 18))
         self.record_all_btn.setFixedHeight(28)
-        
+
         self.camera_count_label = QLabel(tr("label.camera_count", total=0, active=0))
         self.camera_count_label.setStyleSheet("font-weight: bold;")
         
@@ -252,6 +272,7 @@ class MainWindow(QMainWindow):
         self.camera_list_container = CameraListContainer()
         self.camera_list_container.order_changed.connect(self._on_camera_order_changed)
         self.left_scroll.setWidget(self.camera_list_container)
+
         splitter.addWidget(self.left_scroll)
 
         self.big_preview_container = QWidget()
@@ -260,7 +281,7 @@ class MainWindow(QMainWindow):
         self.big_preview_label = PreviewLabel()
         self.big_preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.big_preview_label.setText(tr("big.select_camera"))
-        self.big_preview_label.setStyleSheet("border: 2px solid #555; background-color: black;")
+        self.big_preview_label.setStyleSheet(self._preview_label_style())
         self.big_preview_label.setMinimumHeight(360)
         self.big_preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._connect_preview_label(self.big_preview_label)
@@ -282,6 +303,165 @@ class MainWindow(QMainWindow):
         self.status_timer.timeout.connect(self.update_status_display)
         self.status_timer.start(2000)  # Alle 2 Sekunden
 
+    def _create_detection_config_group(self):
+        group = QGroupBox(tr("group.detection_config"))
+        self.detection_group = group
+        layout = QVBoxLayout()
+
+        row1 = QHBoxLayout()
+        self.detection_model_label = QLabel(tr("label.detection_model"))
+        self.detection_model_input = QLineEdit(str(self.detection_config.get("model", "yolo11n.pt")))
+        self.detection_model_input.setMaximumWidth(180)
+        row1.addWidget(self.detection_model_label)
+        row1.addWidget(self.detection_model_input)
+        self.detection_model_test_btn = QPushButton(tr("btn.model_test"))
+        self.detection_model_test_btn.clicked.connect(self.test_detection_model)
+        row1.addWidget(self.detection_model_test_btn)
+
+        self.detection_device_label = QLabel(tr("label.detection_device"))
+        self.detection_device_combo = QComboBox()
+        for label, value in (
+            (tr("detection.device.auto"), "auto"),
+            (tr("detection.device.cuda"), "cuda:0"),
+            (tr("detection.device.cpu"), "cpu"),
+        ):
+            self.detection_device_combo.addItem(label, value)
+        row1.addWidget(self.detection_device_label)
+        row1.addWidget(self.detection_device_combo)
+
+        self.detection_imgsz_label = QLabel(tr("label.detection_imgsz"))
+        self.detection_imgsz_spin = QSpinBox()
+        self.detection_imgsz_spin.setRange(320, 1536)
+        self.detection_imgsz_spin.setSingleStep(32)
+        self.detection_imgsz_spin.setValue(int(self.detection_config.get("imgsz", 640)))
+        row1.addWidget(self.detection_imgsz_label)
+        row1.addWidget(self.detection_imgsz_spin)
+        row1.addStretch()
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.detection_conf_label = QLabel(tr("label.detection_conf"))
+        self.detection_conf_spin = QDoubleSpinBox()
+        self.detection_conf_spin.setRange(0.05, 0.95)
+        self.detection_conf_spin.setSingleStep(0.05)
+        self.detection_conf_spin.setDecimals(2)
+        self.detection_conf_spin.setValue(float(self.detection_config.get("confidence", 0.4)))
+        row2.addWidget(self.detection_conf_label)
+        row2.addWidget(self.detection_conf_spin)
+
+        self.detection_fps_label = QLabel(tr("label.detection_fps"))
+        self.detection_fps_spin = QDoubleSpinBox()
+        self.detection_fps_spin.setRange(0.2, 15.0)
+        self.detection_fps_spin.setSingleStep(0.5)
+        self.detection_fps_spin.setDecimals(1)
+        self.detection_fps_spin.setValue(float(self.detection_config.get("analysis_fps_per_camera", 3.0)))
+        row2.addWidget(self.detection_fps_label)
+        row2.addWidget(self.detection_fps_spin)
+
+        self.detection_cooldown_label = QLabel(tr("label.detection_cooldown"))
+        self.detection_cooldown_spin = QSpinBox()
+        self.detection_cooldown_spin.setRange(0, 3600)
+        self.detection_cooldown_spin.setValue(int(self.detection_config.get("cooldown_seconds", 180)))
+        row2.addWidget(self.detection_cooldown_label)
+        row2.addWidget(self.detection_cooldown_spin)
+        row2.addStretch()
+        layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        self.detection_classes_label = QLabel(tr("label.detection_classes"))
+        self.detection_classes_input = QLineEdit(", ".join(self.detection_config.get("classes", [])))
+        row3.addWidget(self.detection_classes_label)
+        row3.addWidget(self.detection_classes_input)
+        layout.addLayout(row3)
+
+        group.setLayout(layout)
+        for widget in (
+            self.detection_model_input,
+            self.detection_device_combo,
+            self.detection_imgsz_spin,
+            self.detection_conf_spin,
+            self.detection_fps_spin,
+            self.detection_cooldown_spin,
+            self.detection_classes_input,
+        ):
+            if isinstance(widget, QLineEdit):
+                widget.editingFinished.connect(self._save_detection_config_from_ui)
+            else:
+                widget.valueChanged.connect(self._save_detection_config_from_ui) if hasattr(widget, "valueChanged") else widget.currentIndexChanged.connect(self._save_detection_config_from_ui)
+        return group
+
+    def _create_email_config_group(self):
+        group = QGroupBox(tr("group.email_config"))
+        self.email_group = group
+        layout = QVBoxLayout()
+
+        row1 = QHBoxLayout()
+        self.email_enabled_check = QCheckBox(tr("label.email_enabled"))
+        self.email_enabled_check.setChecked(bool(self.email_config.get("enabled", False)))
+        row1.addWidget(self.email_enabled_check)
+        self.email_host_label = QLabel(tr("label.smtp_host"))
+        self.email_host_input = QLineEdit(str(self.email_config.get("smtp_host", "")))
+        row1.addWidget(self.email_host_label)
+        row1.addWidget(self.email_host_input)
+        self.email_port_label = QLabel(tr("label.smtp_port"))
+        self.email_port_spin = QSpinBox()
+        self.email_port_spin.setRange(1, 65535)
+        self.email_port_spin.setValue(int(self.email_config.get("smtp_port", 587)))
+        row1.addWidget(self.email_port_label)
+        row1.addWidget(self.email_port_spin)
+        self.email_tls_check = QCheckBox(tr("label.smtp_tls"))
+        self.email_tls_check.setChecked(bool(self.email_config.get("use_tls", True)))
+        row1.addWidget(self.email_tls_check)
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.email_user_label = QLabel(tr("label.smtp_username"))
+        self.email_user_input = QLineEdit(str(self.email_config.get("smtp_username", "")))
+        row2.addWidget(self.email_user_label)
+        row2.addWidget(self.email_user_input)
+        self.email_password_label = QLabel(tr("label.smtp_password"))
+        self.email_password_input = QLineEdit(str(self.email_config.get("smtp_password", "")))
+        self.email_password_input.setEchoMode(QLineEdit.EchoMode.Password)
+        row2.addWidget(self.email_password_label)
+        row2.addWidget(self.email_password_input)
+        layout.addLayout(row2)
+
+        row3 = QHBoxLayout()
+        self.email_from_label = QLabel(tr("label.email_from"))
+        self.email_from_input = QLineEdit(str(self.email_config.get("from", "")))
+        row3.addWidget(self.email_from_label)
+        row3.addWidget(self.email_from_input)
+        self.email_to_label = QLabel(tr("label.email_to"))
+        to_value = self.email_config.get("to", [])
+        if isinstance(to_value, list):
+            to_value = ", ".join(to_value)
+        self.email_to_input = QLineEdit(str(to_value))
+        row3.addWidget(self.email_to_label)
+        row3.addWidget(self.email_to_input)
+        self.email_test_btn = QPushButton(tr("btn.email_test"))
+        self.email_test_btn.clicked.connect(self.send_test_email)
+        row3.addWidget(self.email_test_btn)
+        layout.addLayout(row3)
+
+        group.setLayout(layout)
+        for widget in (
+            self.email_enabled_check,
+            self.email_tls_check,
+            self.email_host_input,
+            self.email_port_spin,
+            self.email_user_input,
+            self.email_password_input,
+            self.email_from_input,
+            self.email_to_input,
+        ):
+            if isinstance(widget, QLineEdit):
+                widget.editingFinished.connect(self._save_email_config_from_ui)
+            elif isinstance(widget, QCheckBox):
+                widget.stateChanged.connect(self._save_email_config_from_ui)
+            else:
+                widget.valueChanged.connect(self._save_email_config_from_ui)
+        return group
+
     def _is_qobject_deleted(self, obj) -> bool:
         if obj is None:
             return True
@@ -292,9 +472,184 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _save_detection_config_from_ui(self):
+        if not hasattr(self, "detection_model_input"):
+            return
+        classes = [
+            item.strip()
+            for item in self.detection_classes_input.text().split(",")
+            if item.strip()
+        ]
+        self.detection_config.update({
+            "model": self.detection_model_input.text().strip() or "yolo11n.pt",
+            "device": self.detection_device_combo.currentData() or "auto",
+            "imgsz": int(self.detection_imgsz_spin.value()),
+            "confidence": float(self.detection_conf_spin.value()),
+            "analysis_fps_per_camera": float(self.detection_fps_spin.value()),
+            "cooldown_seconds": int(self.detection_cooldown_spin.value()),
+            "classes": classes,
+            "recording_path": self.recording_path,
+            "model_dir": str(default_model_dir(self.recording_path)),
+        })
+        self.save_config()
+
+    def _save_email_config_from_ui(self):
+        if not hasattr(self, "email_enabled_check"):
+            return
+        recipients = [
+            item.strip()
+            for item in self.email_to_input.text().split(",")
+            if item.strip()
+        ]
+        self.email_config.update({
+            "enabled": bool(self.email_enabled_check.isChecked()),
+            "smtp_host": self.email_host_input.text().strip(),
+            "smtp_port": int(self.email_port_spin.value()),
+            "smtp_username": self.email_user_input.text().strip(),
+            "smtp_password": self.email_password_input.text(),
+            "use_tls": bool(self.email_tls_check.isChecked()),
+            "from": self.email_from_input.text().strip(),
+            "to": recipients,
+        })
+        self.save_config()
+
+    def _sync_detection_config_ui(self):
+        if not hasattr(self, "detection_model_input"):
+            return
+        self.detection_model_input.setText(str(self.detection_config.get("model", "yolo11n.pt")))
+        idx = self.detection_device_combo.findData(str(self.detection_config.get("device", "auto")))
+        if idx >= 0:
+            self.detection_device_combo.setCurrentIndex(idx)
+        self.detection_imgsz_spin.setValue(int(self.detection_config.get("imgsz", 640)))
+        self.detection_conf_spin.setValue(float(self.detection_config.get("confidence", 0.4)))
+        self.detection_fps_spin.setValue(float(self.detection_config.get("analysis_fps_per_camera", 3.0)))
+        self.detection_cooldown_spin.setValue(int(self.detection_config.get("cooldown_seconds", 180)))
+        self.detection_classes_input.setText(", ".join(self.detection_config.get("classes", [])))
+
+    def _sync_email_config_ui(self):
+        if not hasattr(self, "email_enabled_check"):
+            return
+        self.email_enabled_check.setChecked(bool(self.email_config.get("enabled", False)))
+        self.email_host_input.setText(str(self.email_config.get("smtp_host", "")))
+        self.email_port_spin.setValue(int(self.email_config.get("smtp_port", 587)))
+        self.email_tls_check.setChecked(bool(self.email_config.get("use_tls", True)))
+        self.email_user_input.setText(str(self.email_config.get("smtp_username", "")))
+        self.email_password_input.setText(str(self.email_config.get("smtp_password", "")))
+        self.email_from_input.setText(str(self.email_config.get("from", "")))
+        to_value = self.email_config.get("to", [])
+        if isinstance(to_value, list):
+            to_value = ", ".join(to_value)
+        self.email_to_input.setText(str(to_value))
+
+    def _runtime_detection_config(self):
+        config = dict(self.detection_config)
+        config["recording_path"] = self.recording_path
+        config["model_dir"] = str(default_model_dir(self.recording_path))
+        return config
+
+    def test_detection_model(self):
+        self._save_detection_config_from_ui()
+        if hasattr(self, "detection_model_test_btn"):
+            self.detection_model_test_btn.setEnabled(False)
+        self.statusBar().showMessage(tr("status.model_test_running"))
+
+        model_name = str(self.detection_config.get("model", "yolo11n.pt"))
+        model_dir = default_model_dir(self.recording_path)
+
+        def run():
+            try:
+                model_path = prepare_model_path(model_name, model_dir)
+                self.model_test_finished.emit(
+                    True,
+                    tr("status.model_test_ok", path=model_path),
+                    str(model_path),
+                )
+            except Exception as exc:
+                self.model_test_finished.emit(
+                    False,
+                    tr("status.model_test_failed", error=exc),
+                    "",
+                )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_model_test_finished(self, ok: bool, message: str, model_path: str):
+        if hasattr(self, "detection_model_test_btn"):
+            self.detection_model_test_btn.setEnabled(True)
+        if ok and model_path:
+            self.detection_config["model"] = model_path
+            if hasattr(self, "detection_model_input"):
+                self.detection_model_input.setText(model_path)
+            self.save_config()
+        self.statusBar().showMessage(message)
+
+    def send_test_email(self):
+        self._save_email_config_from_ui()
+        if hasattr(self, "email_test_btn"):
+            self.email_test_btn.setEnabled(False)
+        self.statusBar().showMessage(tr("status.email_test_sending"))
+
+        config = dict(self.email_config)
+        subject = tr("email.test.subject")
+        body = tr("email.test.body")
+
+        def send():
+            try:
+                send_detection_email(config, subject, body, require_enabled=False)
+                self.email_test_finished.emit(True, tr("status.email_test_sent"))
+            except Exception as exc:
+                self.email_test_finished.emit(False, tr("status.email_test_failed", error=exc))
+
+        threading.Thread(target=send, daemon=True).start()
+
+    def _on_email_test_finished(self, ok: bool, message: str):
+        if hasattr(self, "email_test_btn"):
+            self.email_test_btn.setEnabled(True)
+        self.statusBar().showMessage(message)
+
     def _connect_preview_label(self, label: PreviewLabel):
         label.double_clicked.connect(self._on_big_preview_label_double_clicked)
         label.region_selected.connect(self._on_big_preview_region_selected)
+
+    def _detection_worker_is_running(self) -> bool:
+        return bool(self.detection_worker is not None and self.detection_worker.isRunning())
+
+    def _camera_detection_enabled(self, camera_id) -> bool:
+        try:
+            camera_id = int(camera_id)
+        except Exception:
+            return False
+        camera = next((c for c in self.cameras if int(c.get("id", -1)) == camera_id), None)
+        return bool(camera and camera.get("detection_enabled", False))
+
+    def _any_camera_detection_enabled(self) -> bool:
+        return any(bool(camera.get("detection_enabled", False)) for camera in self.cameras)
+
+    def _preview_label_style(self, camera_id=None):
+        border_color = "#2196f3" if camera_id is not None and self._camera_detection_enabled(camera_id) else "#555"
+        return f"border: 2px solid {border_color}; background-color: black;"
+
+    def _apply_detection_visual_state(self):
+        for widget in self.camera_widgets.values():
+            try:
+                widget.set_detection_active(self._camera_detection_enabled(widget.camera_id))
+            except RuntimeError:
+                continue
+        labels = []
+        label = getattr(self, "big_preview_label", None)
+        if label is not None and not self._is_qobject_deleted(label):
+            labels.append(label)
+        for label in self.multi_view_labels.values():
+            if label is not None and not self._is_qobject_deleted(label):
+                labels.append(label)
+        for label in labels:
+            try:
+                camera_id = getattr(label, "camera_id", None)
+                if camera_id is None:
+                    camera_id = self._get_active_big_preview_camera_id()
+                label.setStyleSheet(self._preview_label_style(camera_id))
+            except RuntimeError:
+                pass
 
     def _get_active_big_preview_camera_id(self):
         if self.selected_camera_ids:
@@ -432,7 +787,9 @@ class MainWindow(QMainWindow):
         widget.clicked.connect(self.select_camera)
         widget.snapshot_requested.connect(self.save_camera_snapshot)
         widget.selection_changed.connect(self.on_camera_selection_changed)
+        widget.detection_toggled.connect(self.toggle_camera_detection)
         widget.record_btn.clicked.connect(lambda checked, cid=camera_id, w=widget: self._on_record_btn_clicked(cid, w, checked))
+        widget.set_detection_active(self._camera_detection_enabled(camera_id))
         self.camera_widgets[camera_id] = widget
         return widget
 
@@ -479,7 +836,8 @@ class MainWindow(QMainWindow):
             'name': camera_info['name'],
             'uid': camera_info.get('uid', ''),
             'model': camera_info.get('model', ''),
-            'manufacturer': camera_info.get('manufacturer', '')
+            'manufacturer': camera_info.get('manufacturer', ''),
+            'detection_enabled': False,
         }
         normalize_reolinkproxy_camera(camera_entry, username=username, password=password)
         return camera_entry
@@ -491,7 +849,8 @@ class MainWindow(QMainWindow):
             'url': url,
             'name': name if name else tr("camera.default_name.id", id=camera_id),
             'uid': uid,
-            'model': ''
+            'model': '',
+            'detection_enabled': False,
         }
         normalize_reolinkproxy_camera(camera_entry)
         return camera_entry
@@ -774,6 +1133,8 @@ class MainWindow(QMainWindow):
         
         # Aus Liste entfernen
         self.cameras = [c for c in self.cameras if c['id'] != camera_id]
+        if not self._any_camera_detection_enabled():
+            self.stop_detection()
         
         self.update_grid_layout()
         self.update_status_display()
@@ -908,6 +1269,10 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 return
 
+        if self._detection_worker_is_running() and self._camera_detection_enabled(camera_id):
+            camera_name = widget.camera_name if widget is not None else str(camera_id)
+            self.detection_worker.submit_frame(camera_id, camera_name, frame)
+
         # Update big preview for single camera selection (old behavior)
         if self.selected_camera_id == camera_id and len(self.selected_camera_ids) == 0:
             self._update_big_preview_frame(frame)
@@ -977,9 +1342,142 @@ class MainWindow(QMainWindow):
         if path:
             self.recording_path = path
             self.snapshot_path = snapshot_path_for(self.recording_path)
+            self.event_path = os.path.join(self.recording_path, "events")
             os.makedirs(self.snapshot_path, exist_ok=True)
+            os.makedirs(self.event_path, exist_ok=True)
             self.save_config()
             self.statusBar().showMessage(tr("status.path", path=path))
+
+    def toggle_camera_detection(self, camera_id: int, enabled: bool):
+        camera = next((c for c in self.cameras if int(c.get("id", -1)) == int(camera_id)), None)
+        if camera is None:
+            return
+        camera["detection_enabled"] = bool(enabled)
+        widget = self.camera_widgets.get(camera_id)
+        if widget is not None:
+            widget.set_detection_active(enabled)
+
+        if enabled:
+            self._model_retry_attempt = 0
+            self._model_retry_scheduled = False
+            self._ensure_detection_worker()
+            if camera_id not in self.camera_threads or not self.camera_threads[camera_id].isRunning():
+                self.start_single_stream(camera_id)
+        elif not self._any_camera_detection_enabled():
+            self.stop_detection()
+        self._apply_detection_visual_state()
+        self.save_config()
+
+    def _ensure_detection_worker(self):
+        if self._detection_worker_is_running():
+            return
+        self.detection_worker = DetectionWorker(self._runtime_detection_config(), self)
+        self.detection_worker.detected.connect(self.handle_detection_event)
+        self.detection_worker.status.connect(self._on_detection_status)
+        self.detection_worker.start()
+
+    def stop_detection(self):
+        worker = self.detection_worker
+        self.detection_worker = None
+        if worker is not None:
+            worker.stop(timeout_ms=3000)
+        self._apply_detection_visual_state()
+        self.save_config()
+        self.statusBar().showMessage(tr("status.detection_stopped"))
+
+    def _on_detection_status(self, message: str):
+        if "deaktiviert" in message or "disabled" in message or "Modell-Laden fehlgeschlagen" in message:
+            self.detection_worker = None
+            self._schedule_detection_retry(message)
+            self._apply_detection_visual_state()
+            self.save_config()
+            return
+        elif "aktiv" in message or "active" in message:
+            self._model_retry_attempt = 0
+            self._model_retry_scheduled = False
+        self.statusBar().showMessage(message)
+
+    def _schedule_detection_retry(self, reason: str):
+        if not self._any_camera_detection_enabled():
+            return
+        if self._model_retry_scheduled:
+            return
+        delay = self._model_retry_delays[min(self._model_retry_attempt, len(self._model_retry_delays) - 1)]
+        self._model_retry_attempt += 1
+        self._model_retry_scheduled = True
+        self.statusBar().showMessage(tr("status.model_retry_scheduled", seconds=delay))
+        QTimer.singleShot(delay * 1000, self._retry_detection_worker)
+
+    def _retry_detection_worker(self):
+        self._model_retry_scheduled = False
+        if not self._any_camera_detection_enabled():
+            return
+        if self._detection_worker_is_running():
+            return
+        self._ensure_detection_worker()
+
+    def handle_detection_event(self, event):
+        os.makedirs(self.snapshot_path, exist_ok=True)
+        os.makedirs(self.event_path, exist_ok=True)
+        timestamp = datetime.fromtimestamp(event.timestamp).strftime("%Y%m%d_%H%M%S")
+        safe_camera = "".join(c if (c.isalnum() or c in "-_") else "_" for c in event.camera_name)
+        safe_label = "".join(c if (c.isalnum() or c in "-_") else "_" for c in event.label)
+        snapshot_file = os.path.join(
+            self.snapshot_path,
+            f"detect_{safe_camera}_{event.camera_id}_{safe_label}_{timestamp}.jpg",
+        )
+
+        try:
+            cv2.imwrite(snapshot_file, event.annotated_frame)
+        except Exception as exc:
+            self.statusBar().showMessage(tr("status.snapshot_error", error=exc))
+            return
+
+        clip_file = None
+        thread = self.camera_threads.get(event.camera_id)
+        if thread is not None:
+            clip_file = thread.start_event_clip(
+                self.event_path,
+                event.label,
+                pre_seconds=float(self.detection_config.get("pre_event_seconds", 8)),
+                post_seconds=float(self.detection_config.get("post_event_seconds", 20)),
+            )
+
+        self.statusBar().showMessage(
+            tr(
+                "status.detection_event",
+                label=event.label,
+                camera=event.camera_name,
+                confidence=f"{event.confidence:.2f}",
+            )
+        )
+        self._send_detection_email_async(event, snapshot_file, clip_file)
+
+    def _send_detection_email_async(self, event, snapshot_file: str, clip_file: str | None):
+        if not self.email_config.get("enabled"):
+            return
+
+        subject = tr("email.detection.subject", label=event.label, camera=event.camera_name)
+        lines = [
+            tr(
+                "email.detection.body",
+                label=event.label,
+                camera=event.camera_name,
+                confidence=f"{event.confidence:.2f}",
+            ),
+            "",
+            f"Snapshot: {snapshot_file}",
+        ]
+        if clip_file:
+            lines.append(f"Clip: {clip_file}")
+
+        def send():
+            try:
+                send_detection_email(self.email_config, subject, "\n".join(lines), snapshot_file)
+            except Exception as exc:
+                print(f"Detection email failed: {exc}")
+
+        threading.Thread(target=send, daemon=True).start()
 
     def save_camera_snapshot(self, camera_id):
         widget = self.camera_widgets.get(camera_id)
@@ -1017,6 +1515,11 @@ class MainWindow(QMainWindow):
             self.cameras = config.get('cameras', [])
             self.recording_path = config.get('recording_path', self.recording_path)
             self.snapshot_path = config.get('snapshot_path', snapshot_path_for(self.recording_path))
+            self.event_path = os.path.join(self.recording_path, "events")
+            self.detection_config = {**DEFAULT_DETECTION_CONFIG, **config.get('detection', {})}
+            self.email_config = {**DEFAULT_EMAIL_CONFIG, **config.get('email', {})}
+            self._sync_detection_config_ui()
+            self._sync_email_config_ui()
             self.cameras_per_row = config.get('cameras_per_row', 3)
             self._restore_preview_camera_ids = config.get('preview_camera_ids', [])
             self.selected_camera_id = config.get('selected_camera_id')
@@ -1042,12 +1545,17 @@ class MainWindow(QMainWindow):
 
             if fixed_config:
                 self.save_config()
+            if self._any_camera_detection_enabled():
+                QTimer.singleShot(300, self._ensure_detection_worker)
         except Exception as e:
             print(f"Fehler beim Laden: {e}")
     
     def closeEvent(self, event):
         """Beim Schließen alle Threads sauber beenden"""
         running_threads = [t for t in self.camera_threads.values() if t.isRunning()]
+        if self.detection_worker is not None:
+            self.detection_worker.stop(timeout_ms=3000)
+            self.detection_worker = None
         if not running_threads:
             event.accept()
             return
@@ -1103,6 +1611,7 @@ class MainWindow(QMainWindow):
         
         self.selected_camera_id = camera_id
         self._sync_big_preview_crop_state(camera_id)
+        self._apply_detection_visual_state()
 
         for cid, widget in self.camera_widgets.items():
             if cid == camera_id:
@@ -1185,10 +1694,45 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(1, tr("tab.config"))
         if hasattr(self, "config_group"):
             self.config_group.setTitle(tr("group.camera_config"))
+        if hasattr(self, "detection_group"):
+            self.detection_group.setTitle(tr("group.detection_config"))
+        if hasattr(self, "email_group"):
+            self.email_group.setTitle(tr("group.email_config"))
         if hasattr(self, "url_label"):
             self.url_label.setText(tr("label.rtsp_url"))
         if hasattr(self, "name_label"):
             self.name_label.setText(tr("label.name"))
+        if hasattr(self, "detection_model_label"):
+            self.detection_model_label.setText(tr("label.detection_model"))
+            self.detection_device_label.setText(tr("label.detection_device"))
+            self.detection_imgsz_label.setText(tr("label.detection_imgsz"))
+            self.detection_conf_label.setText(tr("label.detection_conf"))
+            self.detection_fps_label.setText(tr("label.detection_fps"))
+            self.detection_cooldown_label.setText(tr("label.detection_cooldown"))
+            self.detection_classes_label.setText(tr("label.detection_classes"))
+            if hasattr(self, "detection_model_test_btn"):
+                self.detection_model_test_btn.setText(tr("btn.model_test"))
+            current_device = self.detection_device_combo.currentData()
+            self.detection_device_combo.blockSignals(True)
+            self.detection_device_combo.clear()
+            self.detection_device_combo.addItem(tr("detection.device.auto"), "auto")
+            self.detection_device_combo.addItem(tr("detection.device.cuda"), "cuda:0")
+            self.detection_device_combo.addItem(tr("detection.device.cpu"), "cpu")
+            idx = self.detection_device_combo.findData(current_device or self.detection_config.get("device", "auto"))
+            if idx >= 0:
+                self.detection_device_combo.setCurrentIndex(idx)
+            self.detection_device_combo.blockSignals(False)
+        if hasattr(self, "email_enabled_check"):
+            self.email_enabled_check.setText(tr("label.email_enabled"))
+            self.email_host_label.setText(tr("label.smtp_host"))
+            self.email_port_label.setText(tr("label.smtp_port"))
+            self.email_tls_check.setText(tr("label.smtp_tls"))
+            self.email_user_label.setText(tr("label.smtp_username"))
+            self.email_password_label.setText(tr("label.smtp_password"))
+            self.email_from_label.setText(tr("label.email_from"))
+            self.email_to_label.setText(tr("label.email_to"))
+            if hasattr(self, "email_test_btn"):
+                self.email_test_btn.setText(tr("btn.email_test"))
         if hasattr(self, "grid_cols_label"):
             self.grid_cols_label.setText(tr("label.cameras_per_row"))
         if hasattr(self, "url_input"):
@@ -1331,7 +1875,7 @@ class MainWindow(QMainWindow):
             label = PreviewLabel()
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             label.setText(tr("big.select_camera"))
-            label.setStyleSheet("border: 2px solid #555; background-color: black;")
+            label.setStyleSheet(self._preview_label_style())
             label.setMinimumHeight(360)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
             self._connect_preview_label(label)
@@ -1342,7 +1886,7 @@ class MainWindow(QMainWindow):
             camera_id = selected_ids[0]
             label = PreviewLabel(camera_id)
             label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            label.setStyleSheet("border: 2px solid #555; background-color: black;")
+            label.setStyleSheet(self._preview_label_style(camera_id))
             label.setMinimumHeight(360)
             label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
             self._connect_preview_label(label)
@@ -1384,7 +1928,7 @@ class MainWindow(QMainWindow):
                     # Label for video
                     label = PreviewLabel(camera_id)
                     label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    label.setStyleSheet("border: 2px solid #555; background-color: black;")
+                    label.setStyleSheet(self._preview_label_style(camera_id))
                     label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
                     label.setMinimumHeight(180)
                     label.setMinimumWidth(0)
@@ -1408,6 +1952,7 @@ class MainWindow(QMainWindow):
                 self.big_preview_layout.addLayout(row_layout, 1)
 
         self._update_big_preview_selection_state()
+        self._apply_detection_visual_state()
 
         for camera_id in selected_ids:
             widget = self.camera_widgets.get(camera_id)
@@ -1544,6 +2089,7 @@ class MainWindow(QMainWindow):
             crop_rect = self.preview_crop_rect
 
         self._render_frame_to_label(label, frame, crop_rect=crop_rect)
+        label.setStyleSheet(self._preview_label_style(active_camera_id))
         self._update_big_preview_selection_state()
     
     def _update_multi_view_frame(self, frame, camera_id):
