@@ -364,6 +364,20 @@ class MainWindow(QMainWindow):
         self.detection_cooldown_spin.setValue(int(self.detection_config.get("cooldown_seconds", 180)))
         row2.addWidget(self.detection_cooldown_label)
         row2.addWidget(self.detection_cooldown_spin)
+
+        self.detection_suppress_label = QLabel(tr("label.detection_suppress"))
+        self.detection_suppress_spin = QSpinBox()
+        self.detection_suppress_spin.setRange(0, 600)
+        self.detection_suppress_spin.setValue(int(self.detection_config.get("event_suppress_seconds", 30)))
+        row2.addWidget(self.detection_suppress_label)
+        row2.addWidget(self.detection_suppress_spin)
+
+        self.detection_clip_label = QLabel(tr("label.detection_clip"))
+        self.detection_clip_spin = QSpinBox()
+        self.detection_clip_spin.setRange(1, 180)
+        self.detection_clip_spin.setValue(int(self.detection_config.get("event_clip_seconds", 30)))
+        row2.addWidget(self.detection_clip_label)
+        row2.addWidget(self.detection_clip_spin)
         row2.addStretch()
         layout.addLayout(row2)
 
@@ -382,6 +396,8 @@ class MainWindow(QMainWindow):
             self.detection_conf_spin,
             self.detection_fps_spin,
             self.detection_cooldown_spin,
+            self.detection_suppress_spin,
+            self.detection_clip_spin,
             self.detection_classes_input,
         ):
             if isinstance(widget, QLineEdit):
@@ -487,6 +503,8 @@ class MainWindow(QMainWindow):
             "confidence": float(self.detection_conf_spin.value()),
             "analysis_fps_per_camera": float(self.detection_fps_spin.value()),
             "cooldown_seconds": int(self.detection_cooldown_spin.value()),
+            "event_suppress_seconds": int(self.detection_suppress_spin.value()),
+            "event_clip_seconds": int(self.detection_clip_spin.value()),
             "classes": classes,
             "recording_path": self.recording_path,
             "model_dir": str(default_model_dir(self.recording_path)),
@@ -516,30 +534,65 @@ class MainWindow(QMainWindow):
     def _sync_detection_config_ui(self):
         if not hasattr(self, "detection_model_input"):
             return
-        self.detection_model_input.setText(str(self.detection_config.get("model", "yolo11n.pt")))
-        idx = self.detection_device_combo.findData(str(self.detection_config.get("device", "auto")))
-        if idx >= 0:
-            self.detection_device_combo.setCurrentIndex(idx)
-        self.detection_imgsz_spin.setValue(int(self.detection_config.get("imgsz", 640)))
-        self.detection_conf_spin.setValue(float(self.detection_config.get("confidence", 0.4)))
-        self.detection_fps_spin.setValue(float(self.detection_config.get("analysis_fps_per_camera", 3.0)))
-        self.detection_cooldown_spin.setValue(int(self.detection_config.get("cooldown_seconds", 180)))
-        self.detection_classes_input.setText(", ".join(self.detection_config.get("classes", [])))
+        widgets = [
+            self.detection_model_input,
+            self.detection_device_combo,
+            self.detection_imgsz_spin,
+            self.detection_conf_spin,
+            self.detection_fps_spin,
+            self.detection_cooldown_spin,
+            self.detection_suppress_spin,
+            self.detection_clip_spin,
+            self.detection_classes_input,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.detection_model_input.setText(str(self.detection_config.get("model", "yolo11n.pt")))
+            idx = self.detection_device_combo.findData(str(self.detection_config.get("device", "auto")))
+            if idx >= 0:
+                self.detection_device_combo.setCurrentIndex(idx)
+            self.detection_imgsz_spin.setValue(int(self.detection_config.get("imgsz", 640)))
+            self.detection_conf_spin.setValue(float(self.detection_config.get("confidence", 0.4)))
+            self.detection_fps_spin.setValue(float(self.detection_config.get("analysis_fps_per_camera", 3.0)))
+            self.detection_cooldown_spin.setValue(int(self.detection_config.get("cooldown_seconds", 180)))
+            self.detection_suppress_spin.setValue(int(self.detection_config.get("event_suppress_seconds", 30)))
+            self.detection_clip_spin.setValue(int(self.detection_config.get("event_clip_seconds", 30)))
+            self.detection_classes_input.setText(", ".join(self.detection_config.get("classes", [])))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
 
     def _sync_email_config_ui(self):
         if not hasattr(self, "email_enabled_check"):
             return
-        self.email_enabled_check.setChecked(bool(self.email_config.get("enabled", False)))
-        self.email_host_input.setText(str(self.email_config.get("smtp_host", "")))
-        self.email_port_spin.setValue(int(self.email_config.get("smtp_port", 587)))
-        self.email_tls_check.setChecked(bool(self.email_config.get("use_tls", True)))
-        self.email_user_input.setText(str(self.email_config.get("smtp_username", "")))
-        self.email_password_input.setText(str(self.email_config.get("smtp_password", "")))
-        self.email_from_input.setText(str(self.email_config.get("from", "")))
-        to_value = self.email_config.get("to", [])
-        if isinstance(to_value, list):
-            to_value = ", ".join(to_value)
-        self.email_to_input.setText(str(to_value))
+        widgets = [
+            self.email_enabled_check,
+            self.email_host_input,
+            self.email_port_spin,
+            self.email_tls_check,
+            self.email_user_input,
+            self.email_password_input,
+            self.email_from_input,
+            self.email_to_input,
+        ]
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.email_enabled_check.setChecked(bool(self.email_config.get("enabled", False)))
+            self.email_host_input.setText(str(self.email_config.get("smtp_host", "")))
+            self.email_port_spin.setValue(int(self.email_config.get("smtp_port", 587)))
+            self.email_tls_check.setChecked(bool(self.email_config.get("use_tls", True)))
+            self.email_user_input.setText(str(self.email_config.get("smtp_username", "")))
+            self.email_password_input.setText(str(self.email_config.get("smtp_password", "")))
+            self.email_from_input.setText(str(self.email_config.get("from", "")))
+            to_value = self.email_config.get("to", [])
+            if isinstance(to_value, list):
+                to_value = ", ".join(to_value)
+            self.email_to_input.setText(str(to_value))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
 
     def _runtime_detection_config(self):
         config = dict(self.detection_config)
@@ -1436,11 +1489,15 @@ class MainWindow(QMainWindow):
         clip_file = None
         thread = self.camera_threads.get(event.camera_id)
         if thread is not None:
+            clip_seconds = min(180.0, max(1.0, float(self.detection_config.get("event_clip_seconds", 30))))
+            pre_seconds = min(clip_seconds - 1.0, max(0.0, float(self.detection_config.get("pre_event_seconds", 8))))
+            post_seconds = max(1.0, clip_seconds - pre_seconds)
             clip_file = thread.start_event_clip(
                 self.event_path,
                 event.label,
-                pre_seconds=float(self.detection_config.get("pre_event_seconds", 8)),
-                post_seconds=float(self.detection_config.get("post_event_seconds", 20)),
+                pre_seconds=pre_seconds,
+                post_seconds=post_seconds,
+                max_seconds=clip_seconds,
             )
 
         self.statusBar().showMessage(
@@ -1709,6 +1766,8 @@ class MainWindow(QMainWindow):
             self.detection_conf_label.setText(tr("label.detection_conf"))
             self.detection_fps_label.setText(tr("label.detection_fps"))
             self.detection_cooldown_label.setText(tr("label.detection_cooldown"))
+            self.detection_suppress_label.setText(tr("label.detection_suppress"))
+            self.detection_clip_label.setText(tr("label.detection_clip"))
             self.detection_classes_label.setText(tr("label.detection_classes"))
             if hasattr(self, "detection_model_test_btn"):
                 self.detection_model_test_btn.setText(tr("btn.model_test"))

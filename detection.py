@@ -31,6 +31,8 @@ DEFAULT_DETECTION_CONFIG = {
     "analysis_fps_per_camera": 3.0,
     "stable_frames": 2,
     "cooldown_seconds": 180,
+    "event_suppress_seconds": 30,
+    "event_clip_seconds": 30,
     "pre_event_seconds": 8,
     "post_event_seconds": 20,
     "classes": [
@@ -158,6 +160,7 @@ class DetectionWorker(QThread):
         self._last_analyzed: dict[int, float] = {}
         self._stable_hits: dict[tuple[int, str], int] = {}
         self._last_event: dict[tuple[int, str], float] = {}
+        self._last_camera_event: dict[int, float] = {}
         self._model = None
         self._names: dict[int, str] = {}
         self._device = "cpu"
@@ -283,6 +286,12 @@ class DetectionWorker(QThread):
         now = time.monotonic()
         stable_frames = max(1, int(self.config.get("stable_frames", 2)))
         cooldown = max(0.0, float(self.config.get("cooldown_seconds", 180)))
+        event_suppress = max(0.0, float(self.config.get("event_suppress_seconds", 30)))
+        eligible: list[tuple[str, dict[str, Any]]] = []
+
+        if now - self._last_camera_event.get(camera_id, 0.0) < event_suppress:
+            self._reset_stable_hits(camera_id)
+            return
 
         for label, best in best_by_label.items():
             key = (camera_id, label)
@@ -291,25 +300,42 @@ class DetectionWorker(QThread):
                 continue
             if now - self._last_event.get(key, 0.0) < cooldown:
                 continue
+            eligible.append((label, best))
 
-            self._last_event[key] = now
-            annotated = self._annotate(frame, detections)
-            self.detected.emit(
-                DetectionResult(
-                    camera_id=camera_id,
-                    camera_name=camera_name,
-                    label=label,
-                    confidence=float(best["confidence"]),
-                    detections=detections,
-                    annotated_frame=annotated,
-                    timestamp=time.time(),
-                )
+        if not eligible:
+            return
+
+        label, best = max(eligible, key=lambda item: float(item[1]["confidence"]))
+        self._last_event[(camera_id, label)] = now
+        self._last_camera_event[camera_id] = now
+        self._reset_other_stable_hits(camera_id, label)
+        annotated = self._annotate(frame, detections)
+        self.detected.emit(
+            DetectionResult(
+                camera_id=camera_id,
+                camera_name=camera_name,
+                label=label,
+                confidence=float(best["confidence"]),
+                detections=detections,
+                annotated_frame=annotated,
+                timestamp=time.time(),
             )
+        )
 
     def _decay_stable_hits(self, camera_id: int):
         for key in list(self._stable_hits.keys()):
             if key[0] == camera_id:
                 self._stable_hits[key] = max(0, self._stable_hits[key] - 1)
+
+    def _reset_stable_hits(self, camera_id: int):
+        for key in list(self._stable_hits.keys()):
+            if key[0] == camera_id:
+                self._stable_hits[key] = 0
+
+    def _reset_other_stable_hits(self, camera_id: int, active_label: str):
+        for key in list(self._stable_hits.keys()):
+            if key[0] == camera_id and key[1] != active_label:
+                self._stable_hits[key] = 0
 
     def _annotate(self, frame, detections: list[dict[str, Any]]):
         annotated = frame.copy()
