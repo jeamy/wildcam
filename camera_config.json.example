@@ -21,7 +21,6 @@
     }
   ],
   "recording_path": "~/Videos/Reolink",
-  "model_dir": "~/Videos/Reolink/models"
   "detection": {
     "model": "yolo11n.pt",
     "imgsz": 640,
@@ -30,6 +29,8 @@
     "analysis_fps_per_camera": 3.0,
     "stable_frames": 2,
     "cooldown_seconds": 180,
+    "event_suppress_seconds": 30,
+    "event_clip_seconds": 30,
     "pre_event_seconds": 8,
     "post_event_seconds": 20,
     "classes": [

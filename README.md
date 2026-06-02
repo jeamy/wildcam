@@ -188,6 +188,8 @@ Example snippet:
     "analysis_fps_per_camera": 3.0,
     "stable_frames": 2,
     "cooldown_seconds": 180,
+    "event_suppress_seconds": 30,
+    "event_clip_seconds": 30,
     "pre_event_seconds": 8,
     "post_event_seconds": 20,
     "classes": ["person", "car", "truck", "dog", "cat", "bird"]
@@ -221,12 +223,16 @@ multi-camera testing. For a GTX 1660 Ti, start with:
 "model": "yolo11n.pt"
 ```
 
-When an object is detected for `stable_frames` consecutive analysis frames and
-the per-camera/per-class `cooldown_seconds` has elapsed, WildCam:
+When an object is detected for `stable_frames` consecutive analysis frames,
+the per-camera/per-class `cooldown_seconds` has elapsed, and the camera-wide
+`event_suppress_seconds` burst lock has elapsed, WildCam:
 
 - saves an annotated JPEG snapshot in `~/Videos/Reolink/snapshots`
 - starts an AVI event clip in `~/Videos/Reolink/events`
 - sends an email with the image attached if `email.enabled` is `true`
+
+`event_clip_seconds` controls the total event video length and is capped at
+180 seconds. `pre_event_seconds` is included in that total length.
 
 Pretrained COCO classes include `person`, vehicles, and common animals such as
 `dog`, `cat`, `bird`, `horse`, `sheep`, and `cow`. Wild animals such as deer,

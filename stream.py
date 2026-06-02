@@ -37,6 +37,7 @@ class CameraThread(QThread):
         self.event_writer = None
         self._event_clip_filename = None
         self._event_clip_until = 0.0
+        self._event_clip_started = 0.0
         self._writer_lock = threading.Lock()
         self._buffer_lock = threading.Lock()
         self._frame_buffer = deque()
@@ -267,6 +268,7 @@ class CameraThread(QThread):
         self.event_writer = None
         self._event_clip_filename = None
         self._event_clip_until = 0.0
+        self._event_clip_started = 0.0
     
     def start_recording(self, output_path):
         """Starte Aufzeichnung"""
@@ -310,23 +312,35 @@ class CameraThread(QThread):
             return filename
         return None
 
-    def start_event_clip(self, output_path, label: str, pre_seconds: float = 8.0, post_seconds: float = 20.0):
+    def start_event_clip(
+        self,
+        output_path,
+        label: str,
+        pre_seconds: float = 8.0,
+        post_seconds: float = 20.0,
+        max_seconds: float = 180.0,
+    ):
         """Start a short event clip from the rolling frame buffer plus future frames."""
         if not (self.cap and self.cap.isOpened()):
             return None
 
         with self._writer_lock:
             now = time.monotonic()
+            max_seconds = min(180.0, max(1.0, float(max_seconds)))
+            post_seconds = max(1.0, min(float(post_seconds), max_seconds))
             if self.event_writer is not None and now < self._event_clip_until:
-                self._event_clip_until = max(self._event_clip_until, now + max(1.0, float(post_seconds)))
+                max_until = (self._event_clip_started or now) + max_seconds
+                self._event_clip_until = min(max_until, max(self._event_clip_until, now + post_seconds))
                 return self._event_clip_filename
 
             with self._buffer_lock:
-                buffered = [
-                    frame
+                buffered_items = [
+                    (frame_time, frame)
                     for frame_time, frame in self._frame_buffer
-                    if frame_time >= now - max(0.0, float(pre_seconds))
+                    if frame_time >= now - max(0.0, min(float(pre_seconds), max_seconds))
                 ]
+            buffered = [frame for _frame_time, frame in buffered_items]
+            actual_pre_seconds = now - buffered_items[0][0] if buffered_items else 0.0
 
             fps = float(self.cap.get(cv2.CAP_PROP_FPS))
             if not fps or fps <= 0 or fps > 120:
@@ -355,7 +369,8 @@ class CameraThread(QThread):
 
             self.event_writer = vw
             self._event_clip_filename = filename
-            self._event_clip_until = now + max(1.0, float(post_seconds))
+            self._event_clip_started = now - max(0.0, actual_pre_seconds)
+            self._event_clip_until = min(self._event_clip_started + max_seconds, now + post_seconds)
             return filename
     
     def stop_recording(self):
