@@ -316,6 +316,7 @@ class CameraThread(QThread):
         self,
         output_path,
         label: str,
+        camera_name: str = "",
         pre_seconds: float = 8.0,
         post_seconds: float = 20.0,
         max_seconds: float = 180.0,
@@ -355,7 +356,9 @@ class CameraThread(QThread):
             os.makedirs(output_path, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             safe_label = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(label))
-            filename = os.path.join(output_path, f"event_{self.camera_id}_{safe_label}_{timestamp}.avi")
+            safe_camera = "".join(c if (c.isalnum() or c in "-_") else "_" for c in str(camera_name))
+            prefix = f"event_{safe_camera}_{self.camera_id}" if safe_camera else f"event_{self.camera_id}"
+            filename = os.path.join(output_path, f"{prefix}_{safe_label}_{timestamp}.avi")
 
             fourcc = cv2.VideoWriter_fourcc(*'MJPG')
             vw = cv2.VideoWriter(filename, fourcc, fps, (width, height))

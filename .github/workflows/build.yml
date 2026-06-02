@@ -143,15 +143,23 @@ jobs:
           path: dist/*_${{ matrix.platform }}_*.zip
           if-no-files-found: error
 
+      - name: Prepare Linux release assets
+        if: runner.os == 'Linux'
+        run: |
+          python scripts/prepare_release_assets.py --platform "${{ matrix.platform }}" --include-appimage
+
+      - name: Prepare non-Linux release assets
+        if: runner.os != 'Linux'
+        run: |
+          python scripts/prepare_release_assets.py --platform "${{ matrix.platform }}"
+
       - name: Publish Linux release assets
         if: runner.os == 'Linux'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ needs.prepare.outputs.target_sha }}
-          files: |
-            dist/*_${{ matrix.platform }}_*.zip
-            dist/*_${{ matrix.platform }}_*.AppImage
+          files: dist/release-assets/*
           generate_release_notes: true
           overwrite_files: true
 
@@ -161,6 +169,6 @@ jobs:
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
           target_commitish: ${{ needs.prepare.outputs.target_sha }}
-          files: dist/*_${{ matrix.platform }}_*.zip
+          files: dist/release-assets/*
           generate_release_notes: true
           overwrite_files: true
