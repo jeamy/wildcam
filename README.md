@@ -192,6 +192,8 @@ Example snippet:
     "event_clip_seconds": 30,
     "pre_event_seconds": 8,
     "post_event_seconds": 20,
+    "motion_required_classes": ["bicycle", "car", "motorcycle", "bus", "truck"],
+    "motion_min_pixels": 12.0,
     "classes": ["person", "car", "truck", "dog", "cat", "bird"]
   },
   "email": {
@@ -233,6 +235,11 @@ the per-camera/per-class `cooldown_seconds` has elapsed, and the camera-wide
 
 `event_clip_seconds` controls the total event video length and is capped at
 180 seconds. `pre_event_seconds` is included in that total length.
+
+Classes listed in `motion_required_classes` only trigger an event when the
+detected bounding box moves by at least `motion_min_pixels` between analyzed
+frames. By default this is enabled for vehicle classes, so parked cars do not
+create repeated alerts.
 
 Pretrained COCO classes include `person`, vehicles, and common animals such as
 `dog`, `cat`, `bird`, `horse`, `sheep`, and `cow`. Wild animals such as deer,

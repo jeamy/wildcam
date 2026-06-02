@@ -388,6 +388,22 @@ class MainWindow(QMainWindow):
         row3.addWidget(self.detection_classes_input)
         layout.addLayout(row3)
 
+        row4 = QHBoxLayout()
+        self.detection_motion_classes_label = QLabel(tr("label.detection_motion_classes"))
+        self.detection_motion_classes_input = QLineEdit(", ".join(self.detection_config.get("motion_required_classes", [])))
+        row4.addWidget(self.detection_motion_classes_label)
+        row4.addWidget(self.detection_motion_classes_input)
+
+        self.detection_motion_pixels_label = QLabel(tr("label.detection_motion_pixels"))
+        self.detection_motion_pixels_spin = QDoubleSpinBox()
+        self.detection_motion_pixels_spin.setRange(0.0, 200.0)
+        self.detection_motion_pixels_spin.setSingleStep(1.0)
+        self.detection_motion_pixels_spin.setDecimals(1)
+        self.detection_motion_pixels_spin.setValue(float(self.detection_config.get("motion_min_pixels", 12.0)))
+        row4.addWidget(self.detection_motion_pixels_label)
+        row4.addWidget(self.detection_motion_pixels_spin)
+        layout.addLayout(row4)
+
         group.setLayout(layout)
         for widget in (
             self.detection_model_input,
@@ -399,6 +415,8 @@ class MainWindow(QMainWindow):
             self.detection_suppress_spin,
             self.detection_clip_spin,
             self.detection_classes_input,
+            self.detection_motion_classes_input,
+            self.detection_motion_pixels_spin,
         ):
             if isinstance(widget, QLineEdit):
                 widget.editingFinished.connect(self._save_detection_config_from_ui)
@@ -496,6 +514,11 @@ class MainWindow(QMainWindow):
             for item in self.detection_classes_input.text().split(",")
             if item.strip()
         ]
+        motion_classes = [
+            item.strip()
+            for item in self.detection_motion_classes_input.text().split(",")
+            if item.strip()
+        ]
         self.detection_config.update({
             "model": self.detection_model_input.text().strip() or "yolo11n.pt",
             "device": self.detection_device_combo.currentData() or "auto",
@@ -506,6 +529,8 @@ class MainWindow(QMainWindow):
             "event_suppress_seconds": int(self.detection_suppress_spin.value()),
             "event_clip_seconds": int(self.detection_clip_spin.value()),
             "classes": classes,
+            "motion_required_classes": motion_classes,
+            "motion_min_pixels": float(self.detection_motion_pixels_spin.value()),
             "recording_path": self.recording_path,
             "model_dir": str(default_model_dir(self.recording_path)),
         })
@@ -544,6 +569,8 @@ class MainWindow(QMainWindow):
             self.detection_suppress_spin,
             self.detection_clip_spin,
             self.detection_classes_input,
+            self.detection_motion_classes_input,
+            self.detection_motion_pixels_spin,
         ]
         for widget in widgets:
             widget.blockSignals(True)
@@ -559,6 +586,8 @@ class MainWindow(QMainWindow):
             self.detection_suppress_spin.setValue(int(self.detection_config.get("event_suppress_seconds", 30)))
             self.detection_clip_spin.setValue(int(self.detection_config.get("event_clip_seconds", 30)))
             self.detection_classes_input.setText(", ".join(self.detection_config.get("classes", [])))
+            self.detection_motion_classes_input.setText(", ".join(self.detection_config.get("motion_required_classes", [])))
+            self.detection_motion_pixels_spin.setValue(float(self.detection_config.get("motion_min_pixels", 12.0)))
         finally:
             for widget in widgets:
                 widget.blockSignals(False)
@@ -1495,6 +1524,7 @@ class MainWindow(QMainWindow):
             clip_file = thread.start_event_clip(
                 self.event_path,
                 event.label,
+                camera_name=event.camera_name,
                 pre_seconds=pre_seconds,
                 post_seconds=post_seconds,
                 max_seconds=clip_seconds,
@@ -1769,6 +1799,8 @@ class MainWindow(QMainWindow):
             self.detection_suppress_label.setText(tr("label.detection_suppress"))
             self.detection_clip_label.setText(tr("label.detection_clip"))
             self.detection_classes_label.setText(tr("label.detection_classes"))
+            self.detection_motion_classes_label.setText(tr("label.detection_motion_classes"))
+            self.detection_motion_pixels_label.setText(tr("label.detection_motion_pixels"))
             if hasattr(self, "detection_model_test_btn"):
                 self.detection_model_test_btn.setText(tr("btn.model_test"))
             current_device = self.detection_device_combo.currentData()

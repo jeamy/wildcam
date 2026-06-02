@@ -1,5 +1,6 @@
 import threading
 import time
+import math
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
@@ -35,6 +36,14 @@ DEFAULT_DETECTION_CONFIG = {
     "event_clip_seconds": 30,
     "pre_event_seconds": 8,
     "post_event_seconds": 20,
+    "motion_required_classes": [
+        "bicycle",
+        "car",
+        "motorcycle",
+        "bus",
+        "truck",
+    ],
+    "motion_min_pixels": 12.0,
     "classes": [
         "person",
         "bicycle",
@@ -161,6 +170,7 @@ class DetectionWorker(QThread):
         self._stable_hits: dict[tuple[int, str], int] = {}
         self._last_event: dict[tuple[int, str], float] = {}
         self._last_camera_event: dict[int, float] = {}
+        self._last_motion_box: dict[tuple[int, str], tuple[float, float]] = {}
         self._model = None
         self._names: dict[int, str] = {}
         self._device = "cpu"
@@ -287,6 +297,8 @@ class DetectionWorker(QThread):
         stable_frames = max(1, int(self.config.get("stable_frames", 2)))
         cooldown = max(0.0, float(self.config.get("cooldown_seconds", 180)))
         event_suppress = max(0.0, float(self.config.get("event_suppress_seconds", 30)))
+        motion_required = set(self.config.get("motion_required_classes") or [])
+        motion_min_pixels = max(0.0, float(self.config.get("motion_min_pixels", 12.0)))
         eligible: list[tuple[str, dict[str, Any]]] = []
 
         if now - self._last_camera_event.get(camera_id, 0.0) < event_suppress:
@@ -295,6 +307,9 @@ class DetectionWorker(QThread):
 
         for label, best in best_by_label.items():
             key = (camera_id, label)
+            if motion_required and label in motion_required and not self._has_required_motion(key, best, motion_min_pixels):
+                self._stable_hits[key] = 0
+                continue
             self._stable_hits[key] = self._stable_hits.get(key, 0) + 1
             if self._stable_hits[key] < stable_frames:
                 continue
@@ -336,6 +351,15 @@ class DetectionWorker(QThread):
         for key in list(self._stable_hits.keys()):
             if key[0] == camera_id and key[1] != active_label:
                 self._stable_hits[key] = 0
+
+    def _has_required_motion(self, key: tuple[int, str], detection: dict[str, Any], min_pixels: float) -> bool:
+        x1, y1, x2, y2 = detection["box"]
+        center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+        previous = self._last_motion_box.get(key)
+        self._last_motion_box[key] = center
+        if previous is None:
+            return False
+        return math.hypot(center[0] - previous[0], center[1] - previous[1]) >= min_pixels
 
     def _annotate(self, frame, detections: list[dict[str, Any]]):
         annotated = frame.copy()
