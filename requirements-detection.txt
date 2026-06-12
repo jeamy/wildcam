@@ -1,0 +1,5 @@
+# Optional object detection runtime.
+# Installed on first use into the user's WildCam app-data directory.
+ultralytics>=8.3.0
+torch>=2.2.0
+torchvision>=0.17.0

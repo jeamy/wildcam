@@ -46,9 +46,10 @@ if (Test-Path $buildDir) { Remove-Item $buildDir -Recurse -Force }
   --collect-all "PyQt6" `
   --collect-all "cv2" `
   --collect-all "numpy" `
-  --collect-all "ultralytics" `
-  --collect-all "torch" `
-  --collect-all "torchvision" `
+  --exclude-module "ultralytics" `
+  --exclude-module "torch" `
+  --exclude-module "torchvision" `
+  --exclude-module "nvidia" `
   --hidden-import "detection" `
   --hidden-import "notifications" `
   $EntryPoint

@@ -2,8 +2,12 @@ import threading
 import time
 import math
 from dataclasses import dataclass
+import importlib
+import os
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 from typing import Any
 
 import cv2
@@ -65,6 +69,151 @@ class ModelLoadError(RuntimeError):
     pass
 
 
+class DetectionDependencyError(RuntimeError):
+    pass
+
+
+_DEPENDENCY_LOCK = threading.Lock()
+_DEPENDENCY_PATH_ADDED = False
+
+
+ULTRALYTICS_PACKAGE = "ultralytics>=8.3.0"
+
+
+DETECTION_SUPPORT_PACKAGES = [
+    "pillow>=10.0.0",
+    "pyyaml>=6.0.0",
+    "scipy>=1.10.0",
+    "psutil>=5.9.0",
+    "matplotlib>=3.7.0",
+    "polars>=0.20.0",
+    "ultralytics-thop>=2.0.0",
+]
+
+
+def _app_data_dir() -> Path:
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        return Path(base).expanduser() / "WildCam" if base else Path.home() / "AppData" / "Local" / "WildCam"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "WildCam"
+    base = os.environ.get("XDG_DATA_HOME")
+    return Path(base).expanduser() / "wildcam" if base else Path.home() / ".local" / "share" / "wildcam"
+
+
+def detection_runtime_dir() -> Path:
+    version = f"py{sys.version_info.major}.{sys.version_info.minor}"
+    return _app_data_dir() / "detection-runtime" / version
+
+
+def _add_detection_runtime_to_path() -> None:
+    global _DEPENDENCY_PATH_ADDED
+    runtime_dir = detection_runtime_dir()
+    if _DEPENDENCY_PATH_ADDED and str(runtime_dir) in sys.path:
+        return
+    if runtime_dir.exists():
+        sys.path.insert(0, str(runtime_dir))
+    _DEPENDENCY_PATH_ADDED = True
+
+
+def _has_detection_dependencies() -> bool:
+    _add_detection_runtime_to_path()
+    return all(
+        importlib.util.find_spec(module_name) is not None
+        for module_name in ("ultralytics", "torch", "torchvision")
+    )
+
+
+def _python_version(command: list[str]) -> tuple[int, int] | None:
+    try:
+        result = subprocess.run(
+            [*command, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    try:
+        major, minor = result.stdout.strip().split(".", 1)
+        return int(major), int(minor)
+    except Exception:
+        return None
+
+
+def _find_install_python() -> list[str]:
+    if not getattr(sys, "frozen", False):
+        return [sys.executable]
+
+    wanted = (sys.version_info.major, sys.version_info.minor)
+    candidates = [
+        [f"python{wanted[0]}.{wanted[1]}"],
+        ["python3"],
+        ["python"],
+    ]
+    if sys.platform == "win32":
+        candidates = [["py", f"-{wanted[0]}.{wanted[1]}"], ["py", "-3"], *candidates]
+
+    for command in candidates:
+        version = _python_version(command)
+        if version == wanted:
+            return command
+
+    needed = f"{wanted[0]}.{wanted[1]}"
+    raise DetectionDependencyError(
+        "Objekterkennung benötigt Python "
+        f"{needed} mit pip, um die optionalen ML-Pakete beim ersten Start zu installieren."
+    )
+
+
+def _run_pip(command: list[str]) -> None:
+    try:
+        subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as exc:
+        raise DetectionDependencyError(
+            "Installation der optionalen Objekterkennungs-Pakete fehlgeschlagen. "
+            "Bitte Internetverbindung und pip prüfen."
+        ) from exc
+
+
+def ensure_detection_dependencies() -> None:
+    if _has_detection_dependencies():
+        return
+
+    with _DEPENDENCY_LOCK:
+        if _has_detection_dependencies():
+            return
+
+        runtime_dir = detection_runtime_dir()
+        runtime_dir.mkdir(parents=True, exist_ok=True)
+        python = _find_install_python()
+        base_cmd = [*python, "-m", "pip", "install", "--upgrade", "--target", str(runtime_dir)]
+
+        if sys.platform.startswith("linux"):
+            _run_pip(
+                [
+                    *base_cmd,
+                    "--index-url",
+                    "https://download.pytorch.org/whl/cpu",
+                    "torch>=2.2.0",
+                    "torchvision>=0.17.0",
+                ]
+            )
+        else:
+            _run_pip([*base_cmd, "torch>=2.2.0", "torchvision>=0.17.0"])
+
+        _run_pip([*base_cmd, *DETECTION_SUPPORT_PACKAGES])
+        _run_pip([*base_cmd, "--no-deps", ULTRALYTICS_PACKAGE])
+        importlib.invalidate_caches()
+        _add_detection_runtime_to_path()
+
+        if not _has_detection_dependencies():
+            raise DetectionDependencyError(
+                f"Optionale Objekterkennungs-Pakete wurden installiert, aber nicht vollständig gefunden: {runtime_dir}"
+            )
+
+
 def default_model_dir(recording_path: str) -> Path:
     return Path(recording_path).expanduser() / "models"
 
@@ -95,6 +244,8 @@ def _find_downloaded_weight(file_name: str) -> Path | None:
 
 
 def prepare_model_path(model_name: str, model_dir: str | Path) -> Path:
+    ensure_detection_dependencies()
+
     raw = str(model_name or "").strip() or DEFAULT_DETECTION_CONFIG["model"]
     expanded = Path(raw).expanduser()
     if expanded.exists():
@@ -211,6 +362,9 @@ class DetectionWorker(QThread):
                 self.msleep(500)
 
     def _load_model(self):
+        self.status.emit("Objekterkennung-Runtime wird geprüft/installiert...")
+        ensure_detection_dependencies()
+
         try:
             from ultralytics import YOLO
         except Exception as exc:

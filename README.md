@@ -44,7 +44,10 @@ If you install dependencies via your distro packages (recommended in Docker/mana
 - OpenCV (`cv2`)
 - NumPy
 - requests
-- Ultralytics YOLO / PyTorch for object detection
+
+Object detection is optional. WildCam installs Ultralytics YOLO / PyTorch on
+first use into the user's app-data directory instead of bundling it with the
+main app.
 
 ## Run
 
@@ -53,6 +56,12 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python3 main.py
+```
+
+To preinstall the optional object-detection stack in a development environment:
+
+```bash
+pip install -r requirements-detection.txt
 ```
 
 `./start_wildcam.sh` activates `.venv`/`venv` automatically. If no virtual
@@ -245,12 +254,23 @@ Pretrained COCO classes include `person`, vehicles, and common animals such as
 `dog`, `cat`, `bird`, `horse`, `sheep`, and `cow`. Wild animals such as deer,
 foxes, or boars usually need a custom fine-tuned model for reliable alerts.
 
-Release builds include the Python detection libraries. YOLO model weights are
-resolved by Ultralytics from the configured model name/path, so the first run
-must either be able to download the model or point `detection.model` to a local
-weights file.
+Release builds do not bundle the Python detection libraries. When object
+detection is enabled or **Install/test runtime/model** is clicked for the first time,
+WildCam installs the optional runtime into the user's app-data directory:
 
-The **Download/test model** button stores known YOLO weights in:
+```text
+Linux:   ~/.local/share/wildcam/detection-runtime/py<version>
+macOS:   ~/Library/Application Support/WildCam/detection-runtime/py<version>
+Windows: %LOCALAPPDATA%\WildCam\detection-runtime\py<version>
+```
+
+In standalone builds this requires a matching external Python with `pip` and
+internet access. Linux installs CPU-only PyTorch wheels by default to avoid
+bundling CUDA/NVIDIA libraries. YOLO model weights are resolved by Ultralytics
+from the configured model name/path, so the first detection run must either be
+able to download the model or point `detection.model` to a local weights file.
+
+The **Install/test runtime/model** button stores known YOLO weights in:
 
 ```text
 <recording_path>/models
@@ -405,6 +425,8 @@ Note about ReolinkProxy:
 
 - The packaged app bundles WildCam and helper files such as `docker-compose.yml` and `reolinkproxy_manager.py`.
 - The actual ReolinkProxy runtime is **not** bundled into the app archive.
+- The optional object-detection runtime is **not** bundled into the app archive;
+  it is installed on first use.
 - If you use only normal RTSP cameras, the standalone app is enough.
 - If you use Reolink WLAN / battery cameras, you must additionally run ReolinkProxy externally.
 
