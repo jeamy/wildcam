@@ -219,7 +219,7 @@ Example snippet:
   ],
   "recording_path": "/home/USER/Videos/Reolink",
   "detection": {
-    "model": "yolo11n.pt",
+    "model": "yolo26n.pt",
     "imgsz": 640,
     "confidence": 0.4,
     "device": "auto",
@@ -254,14 +254,27 @@ Example snippet:
 
 Detection is controlled through `camera_config.json` and each camera tile's
 `AI` button.
-The default model is `yolo11n.pt`, which is a small, fast model suitable for
-multi-camera testing. For a GTX 1660 Ti, start with:
+The default model is `yolo26n.pt` (Ultralytics YOLO26, nano), a small, fast
+model suitable for multi-camera testing. For a GTX 1660 Ti, start with:
 
 ```json
 "analysis_fps_per_camera": 3.0,
 "imgsz": 640,
-"model": "yolo11n.pt"
+"model": "yolo26n.pt"
 ```
+
+Known model names are downloaded automatically into the model folder
+(`~/Videos/Reolink/models`): `yolo26n/s/m/l/x.pt` (recommended, needs
+`ultralytics>=8.4.0`), `yolo11n/s/m/l/x.pt` and `yolov8n/s/m/l/x.pt`. Larger
+letters are more accurate but slower. Any other `.pt` file can be used by
+entering its full path. An older ultralytics from a previous WildCam install
+is upgraded automatically the next time detection starts. Existing
+configurations keep their model until you change it.
+
+All of these models are trained on COCO (80 classes). Animals covered are
+`bird`, `cat`, `dog`, `horse`, `sheep`, `cow`, `elephant`, `bear`, `zebra`
+and `giraffe`; deer, foxes, wild boar or martens are **not** separate classes
+and need a custom-trained model.
 
 When an object is detected for `stable_frames` consecutive analysis frames,
 the per-camera/per-class `cooldown_seconds` has elapsed, and the camera-wide

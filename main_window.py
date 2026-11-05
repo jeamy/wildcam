@@ -347,7 +347,7 @@ class MainWindow(QMainWindow):
 
         row1 = QHBoxLayout()
         self.detection_model_label = QLabel(tr("label.detection_model"))
-        self.detection_model_input = QLineEdit(str(self.detection_config.get("model", "yolo11n.pt")))
+        self.detection_model_input = QLineEdit(str(self.detection_config.get("model", DEFAULT_DETECTION_CONFIG["model"])))
         self.detection_model_input.setMaximumWidth(180)
         row1.addWidget(self.detection_model_label)
         row1.addWidget(self.detection_model_input)
@@ -557,7 +557,7 @@ class MainWindow(QMainWindow):
             if item.strip()
         ]
         self.detection_config.update({
-            "model": self.detection_model_input.text().strip() or "yolo11n.pt",
+            "model": self.detection_model_input.text().strip() or DEFAULT_DETECTION_CONFIG["model"],
             "device": self.detection_device_combo.currentData() or "auto",
             "imgsz": int(self.detection_imgsz_spin.value()),
             "confidence": float(self.detection_conf_spin.value()),
@@ -613,7 +613,7 @@ class MainWindow(QMainWindow):
         for widget in widgets:
             widget.blockSignals(True)
         try:
-            self.detection_model_input.setText(str(self.detection_config.get("model", "yolo11n.pt")))
+            self.detection_model_input.setText(str(self.detection_config.get("model", DEFAULT_DETECTION_CONFIG["model"])))
             idx = self.detection_device_combo.findData(str(self.detection_config.get("device", "auto")))
             if idx >= 0:
                 self.detection_device_combo.setCurrentIndex(idx)
@@ -673,7 +673,7 @@ class MainWindow(QMainWindow):
             self.detection_model_test_btn.setEnabled(False)
         self.statusBar().showMessage(tr("status.model_test_running"))
 
-        model_name = str(self.detection_config.get("model", "yolo11n.pt"))
+        model_name = str(self.detection_config.get("model", DEFAULT_DETECTION_CONFIG["model"]))
         model_dir = default_model_dir(self.recording_path)
 
         def run():

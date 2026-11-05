@@ -15,6 +15,11 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 
 KNOWN_YOLO_WEIGHTS = {
+    "yolo26n.pt",
+    "yolo26s.pt",
+    "yolo26m.pt",
+    "yolo26l.pt",
+    "yolo26x.pt",
     "yolo11n.pt",
     "yolo11s.pt",
     "yolo11m.pt",
@@ -29,7 +34,7 @@ KNOWN_YOLO_WEIGHTS = {
 
 
 DEFAULT_DETECTION_CONFIG = {
-    "model": "yolo11n.pt",
+    "model": "yolo26n.pt",
     "imgsz": 640,
     "confidence": 0.4,
     "device": "auto",
@@ -77,7 +82,9 @@ _DEPENDENCY_LOCK = threading.Lock()
 _DEPENDENCY_PATH_ADDED = False
 
 
-ULTRALYTICS_PACKAGE = "ultralytics>=8.3.0"
+# 8.4.0 is the first release with YOLO26.
+ULTRALYTICS_MIN_VERSION = (8, 4, 0)
+ULTRALYTICS_PACKAGE = "ultralytics>=8.4.0"
 
 
 DETECTION_SUPPORT_PACKAGES = [
@@ -122,6 +129,20 @@ def _has_detection_dependencies() -> bool:
         importlib.util.find_spec(module_name) is not None
         for module_name in ("ultralytics", "torch", "torchvision")
     )
+
+
+def _ultralytics_is_current() -> bool:
+    """False if an older ultralytics (e.g. from an earlier WildCam) is installed."""
+    try:
+        from importlib.metadata import version
+
+        parts = []
+        for part in version("ultralytics").split(".")[:3]:
+            digits = "".join(ch for ch in part if ch.isdigit())
+            parts.append(int(digits or 0))
+        return tuple(parts) >= ULTRALYTICS_MIN_VERSION
+    except Exception:
+        return True
 
 
 def _python_version(command: list[str]) -> tuple[int, int] | None:
@@ -177,8 +198,22 @@ def _run_pip(command: list[str]) -> None:
         ) from exc
 
 
+def _upgrade_ultralytics() -> None:
+    if getattr(sys, "frozen", False):
+        runtime_dir = detection_runtime_dir()
+        cmd = [*_find_install_python(), "-m", "pip", "install", "--upgrade", "--target", str(runtime_dir)]
+        _run_pip([*cmd, "--no-deps", ULTRALYTICS_PACKAGE])
+    else:
+        _run_pip([sys.executable, "-m", "pip", "install", "--upgrade", ULTRALYTICS_PACKAGE])
+    importlib.invalidate_caches()
+
+
 def ensure_detection_dependencies() -> None:
     if _has_detection_dependencies():
+        if not _ultralytics_is_current() and "ultralytics" not in sys.modules:
+            with _DEPENDENCY_LOCK:
+                if not _ultralytics_is_current():
+                    _upgrade_ultralytics()
         return
 
     with _DEPENDENCY_LOCK:
@@ -266,9 +301,11 @@ def prepare_model_path(model_name: str, model_dir: str | Path) -> Path:
     try:
         from ultralytics.utils.downloads import attempt_download_asset
 
-        downloaded = Path(attempt_download_asset(file_name)).expanduser()
+        # Download straight into the model folder (no stray copy in the cwd).
+        downloaded = Path(attempt_download_asset(str(local_target))).expanduser()
         if downloaded.exists():
-            shutil.copy2(downloaded, local_target)
+            if downloaded.resolve() != local_target.resolve():
+                shutil.copy2(downloaded, local_target)
             return local_target
     except Exception as exc:
         last_error = exc
@@ -382,7 +419,7 @@ class DetectionWorker(QThread):
             self._device = requested_device
 
         model_dir = self.config.get("model_dir") or default_model_dir(self.config.get("recording_path", "."))
-        model_path = prepare_model_path(str(self.config.get("model", "yolo11n.pt")), model_dir)
+        model_path = prepare_model_path(str(self.config.get("model", DEFAULT_DETECTION_CONFIG["model"])), model_dir)
         self.config["model"] = str(model_path)
         self._model = YOLO(str(model_path))
         self._names = dict(getattr(self._model, "names", {}) or {})
