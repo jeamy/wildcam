@@ -1,4 +1,5 @@
 import socket
+from urllib.parse import unquote, urlparse
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -21,7 +22,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from camera_utils import _build_rtsp_url
+from camera_utils import _build_rtsp_url, camera_hosts, find_matching_camera
 from discovery import CameraDiscoveryThread
 from i18n import tr
 
@@ -137,37 +138,32 @@ class CameraEditDialog(QDialog):
         self.setLayout(layout)
     
     def parse_current_url(self):
-        """Aktuellen URL in Felder zerlegen"""
+        """Aktuellen URL in Felder zerlegen (Zugangsdaten URL-dekodiert)."""
         url = self.camera_data.get('url', '')
-        
+        if not url.lower().startswith(('rtsp://', 'rtsps://')):
+            return
+        sanitized = url.replace('#', '%23')
         try:
-            # Format: rtsp://username:password@ip:port/path
-            if url.startswith('rtsp://'):
-                url = url[7:]  # "rtsp://" entfernen
-                
-                if '@' in url:
-                    auth, rest = url.split('@', 1)
-                    if ':' in auth:
-                        username, password = auth.split(':', 1)
-                        self.username_input.setText(username)
-                        self.password_input.setText(password)
-                    
-                    if ':' in rest:
-                        ip, port_path = rest.split(':', 1)
-                        self.ip_input.setText(ip)
-                        
-                        if '/' in port_path:
-                            port, path = port_path.split('/', 1)
-                            self.port_input.setText(port)
-                            self.path_combo.setCurrentText(path)
-        except Exception:
-            pass
+            u = urlparse(sanitized, allow_fragments=False)
+            port = u.port
+        except ValueError:
+            return
+        if not u.hostname:
+            return
+        self.ip_input.setText(u.hostname)
+        self.port_input.setText(str(port or 554))
+        self.username_input.setText(unquote(u.username or ''))
+        self.password_input.setText(unquote(u.password or ''))
+        path = u.path.lstrip('/')
+        if u.query:
+            path = f"{path}?{u.query}"
+        self.path_combo.setCurrentText(path)
     
     def build_url(self):
         """URL aus Einzelteilen zusammenbauen"""
         ip = self.ip_input.text().strip()
         port = self.port_input.text().strip() or "554"
-        username = self.username_input.text().strip() or "admin"
+        username = self.username_input.text().strip()
         password = self.password_input.text().strip()
         path = self.path_combo.currentText().strip()
         
@@ -194,12 +190,13 @@ class CameraEditDialog(QDialog):
 
 class CameraDiscoveryDialog(QDialog):
     """Dialog für Kamera-Suche"""
-    def __init__(self, parent=None):
+    def __init__(self, existing_cameras=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr("dialog.discovery.title"))
         self.setModal(True)
-        self.resize(700, 500)
-        
+        self.resize(820, 500)
+
+        self.existing_cameras = list(existing_cameras or [])
         self.found_cameras = []
         self.discovery_thread = None
         
@@ -264,7 +261,7 @@ class CameraDiscoveryDialog(QDialog):
         found_layout = QVBoxLayout()
         
         self.camera_table = QTableWidget()
-        self.camera_table.setColumnCount(7)
+        self.camera_table.setColumnCount(8)
         self.camera_table.setHorizontalHeaderLabels([
             tr("dialog.discovery.col.select"),
             tr("dialog.discovery.col.ip"),
@@ -273,6 +270,7 @@ class CameraDiscoveryDialog(QDialog):
             tr("dialog.discovery.col.manufacturer"),
             tr("dialog.discovery.col.ports"),
             tr("dialog.discovery.col.uid"),
+            tr("dialog.discovery.col.in_list"),
         ])
         self.camera_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.camera_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -325,12 +323,22 @@ class CameraDiscoveryDialog(QDialog):
         self.progress_bar.setValue(0)
         
         # Discovery Thread starten
-        self.discovery_thread = CameraDiscoveryThread(network, username=username, password=password)
+        known_hosts = sorted({host for camera in self.existing_cameras for host in camera_hosts(camera)})
+        self.discovery_thread = CameraDiscoveryThread(
+            network, username=username, password=password, known_hosts=known_hosts
+        )
         self.discovery_thread.camera_found.connect(self.on_camera_found)
         self.discovery_thread.progress_update.connect(self.on_progress_update)
         self.discovery_thread.scan_complete.connect(self.on_scan_complete)
         self.discovery_thread.start()
     
+    def done(self, result):
+        # Never drop a running QThread (OK/Cancel during a scan would crash).
+        if self.discovery_thread is not None and self.discovery_thread.isRunning():
+            self.discovery_thread.stop()
+            self.discovery_thread.wait(10000)
+        super().done(result)
+
     def stop_scan(self):
         """Scan stoppen"""
         if self.discovery_thread:
@@ -343,14 +351,16 @@ class CameraDiscoveryDialog(QDialog):
     
     def on_camera_found(self, camera_info):
         """Kamera zur Tabelle hinzufügen"""
+        existing = find_matching_camera(camera_info, self.existing_cameras)
+        camera_info = {**camera_info, 'existing_id': existing.get('id') if existing else None}
         self.found_cameras.append(camera_info)
-        
+
         row = self.camera_table.rowCount()
         self.camera_table.insertRow(row)
-        
-        # Checkbox
+
+        # Checkbox (bereits vorhandene Kameras nicht vorauswählen)
         checkbox = QCheckBox()
-        checkbox.setChecked(True)
+        checkbox.setChecked(existing is None)
         checkbox_widget = QWidget()
         checkbox_layout = QHBoxLayout(checkbox_widget)
         checkbox_layout.addWidget(checkbox)
@@ -365,6 +375,7 @@ class CameraDiscoveryDialog(QDialog):
         self.camera_table.setItem(row, 4, QTableWidgetItem(camera_info['manufacturer']))
         self.camera_table.setItem(row, 5, QTableWidgetItem(', '.join(map(str, camera_info['ports']))))
         self.camera_table.setItem(row, 6, QTableWidgetItem(camera_info.get('uid', '')))
+        self.camera_table.setItem(row, 7, QTableWidgetItem(existing.get('name', '') if existing else ''))
     
     def on_progress_update(self, progress, message):
         """Progress aktualisieren"""

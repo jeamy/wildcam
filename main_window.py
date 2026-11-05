@@ -7,7 +7,6 @@ os.environ['AV_LOG_FORCE_LEVEL'] = '-8'
 os.environ['OPENCV_FFMPEG_CAPTURE_OPTIONS'] = 'rtsp_transport;tcp|loglevel;quiet'
 
 import cv2
-import numpy as np
 import threading
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -33,23 +32,28 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QImage, QPixmap
+from PyQt6.QtGui import QPixmap
 from datetime import datetime
 import time
 
 from camera_utils import (
     _build_rtsp_url,
     _is_battery_camera,
+    find_matching_camera,
+    is_proxy_stream_url,
+    is_reolink_camera,
     normalize_reolinkproxy_camera,
+    with_credentials,
 )
 from config import DEFAULT_RECORDING_PATH, config_payload, load_config_data, save_config_data, snapshot_path_for
 from detection import DEFAULT_DETECTION_CONFIG, DetectionWorker, default_model_dir, prepare_model_path
 from dialogs import CameraDiscoveryDialog, CameraEditDialog
 from i18n import set_language, tr
 from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
+from proxy_status import check_proxy_streams
 from stream import CameraThread
 from ui_resources import load_svg_icon
-from widgets import CameraListContainer, CameraWidget, PreviewLabel
+from widgets import CameraListContainer, CameraWidget, PreviewLabel, letterbox_rgb, rgb_to_pixmap
 
 try:
     import sip  # type: ignore
@@ -64,6 +68,8 @@ class MainWindow(QMainWindow):
     """Hauptfenster der Anwendung"""
     email_test_finished = pyqtSignal(bool, str)
     model_test_finished = pyqtSignal(bool, str, str)
+    proxy_status_ready = pyqtSignal(int, str)
+    PROXY_STATUS_INTERVAL_MS = 60_000
 
     def __init__(self):
         super().__init__()
@@ -100,6 +106,8 @@ class MainWindow(QMainWindow):
         self._order_custom = False
         self.email_test_finished.connect(self._on_email_test_finished)
         self.model_test_finished.connect(self._on_model_test_finished)
+        self.proxy_status_ready.connect(self._on_proxy_status)
+        self._proxy_checks_pending = set()
         
         # Erstelle Aufzeichnungsordner
         os.makedirs(self.recording_path, exist_ok=True)
@@ -108,6 +116,11 @@ class MainWindow(QMainWindow):
         
         self.init_ui()
         self.load_config()
+
+        self._proxy_status_timer = QTimer(self)
+        self._proxy_status_timer.timeout.connect(self.refresh_proxy_status)
+        self._proxy_status_timer.start(self.PROXY_STATUS_INTERVAL_MS)
+        QTimer.singleShot(1000, self.refresh_proxy_status)
     
     def init_ui(self):
         """UI initialisieren"""
@@ -534,6 +547,7 @@ class MainWindow(QMainWindow):
             "recording_path": self.recording_path,
             "model_dir": str(default_model_dir(self.recording_path)),
         })
+        self._apply_prebuffer()
         self.save_config()
 
     def _save_email_config_from_ui(self):
@@ -697,11 +711,7 @@ class MainWindow(QMainWindow):
         return bool(self.detection_worker is not None and self.detection_worker.isRunning())
 
     def _camera_detection_enabled(self, camera_id) -> bool:
-        try:
-            camera_id = int(camera_id)
-        except Exception:
-            return False
-        camera = next((c for c in self.cameras if int(c.get("id", -1)) == camera_id), None)
+        camera = self._camera_by_id(camera_id)
         return bool(camera and camera.get("detection_enabled", False))
 
     def _any_camera_detection_enabled(self) -> bool:
@@ -804,51 +814,12 @@ class MainWindow(QMainWindow):
     def _render_frame_to_label(self, label, frame, crop_rect=None):
         if label is None or self._is_qobject_deleted(label):
             return
-
-        display_w = max(1, label.width())
-        display_h = max(1, label.height())
-
-        src_h, src_w = frame.shape[:2]
-        if src_w <= 0 or src_h <= 0:
+        rgb_frame, content_rect = letterbox_rgb(frame, label.width(), label.height(), crop_rect)
+        if rgb_frame is None:
             label.clear_frame_display_rect()
             return
-
-        crop_x = 0
-        crop_y = 0
-        crop_w = src_w
-        crop_h = src_h
-
-        if crop_rect is not None:
-            crop_x = max(0, min(src_w - 1, crop_rect.x()))
-            crop_y = max(0, min(src_h - 1, crop_rect.y()))
-            max_crop_w = max(1, src_w - crop_x)
-            max_crop_h = max(1, src_h - crop_y)
-            crop_w = max(1, min(max_crop_w, crop_rect.width()))
-            crop_h = max(1, min(max_crop_h, crop_rect.height()))
-
-        frame_view = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
-        if frame_view.size == 0:
-            label.clear_frame_display_rect()
-            return
-
-        scale = min(display_w / crop_w, display_h / crop_h)
-        new_w = max(1, int(crop_w * scale))
-        new_h = max(1, int(crop_h * scale))
-
-        frame_resized = cv2.resize(frame_view, (new_w, new_h))
-        rgb_small = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-        rgb_frame = np.zeros((display_h, display_w, 3), dtype=np.uint8)
-        x = (display_w - new_w) // 2
-        y = (display_h - new_h) // 2
-        rgb_frame[y:y + new_h, x:x + new_w] = rgb_small
-
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
-        pixmap = QPixmap.fromImage(qt_image)
-        pixmap.setDevicePixelRatio(1.0)
-        label.setPixmap(pixmap)
-        label.set_frame_display_rect(QRect(x, y, new_w, new_h))
+        label.setPixmap(rgb_to_pixmap(rgb_frame))
+        label.set_frame_display_rect(content_rect)
 
     def _get_or_create_camera_widget(self, camera: dict) -> CameraWidget:
         camera_id = int(camera.get('id'))
@@ -858,11 +829,7 @@ class MainWindow(QMainWindow):
         if existing is not None and not self._is_qobject_deleted(existing):
             return existing
 
-        # Check if battery camera
-        model = camera.get('model', '')
-        is_battery = _is_battery_camera(model, camera_name)
-        
-        widget = CameraWidget(camera_id, camera_name, is_battery=is_battery)
+        widget = CameraWidget(camera_id, camera_name, is_battery=self._is_battery_entry(camera))
         widget.remove_btn.clicked.connect(lambda checked, cid=camera_id: self.remove_camera(cid))
         widget.edit_btn.clicked.connect(lambda checked, cid=camera_id: self.edit_camera(cid))
         widget.stream_toggled.connect(self.toggle_camera_stream)
@@ -903,24 +870,39 @@ class MainWindow(QMainWindow):
         self._get_or_create_camera_widget(camera_entry)
 
     def _build_discovered_camera_entry(self, camera_info: dict, username: str, password: str) -> dict:
-        rtsp_port = 554 if 554 in camera_info['ports'] else (
-            8554 if 8554 in camera_info['ports'] else 554
-        )
-        camera_entry = {
-            'id': self._allocate_camera_id(),
-            'url': _build_rtsp_url(
+        ports = camera_info.get('ports', [])
+        is_reolink = (camera_info.get('manufacturer') or '').lower() == 'reolink'
+        if camera_info.get('stream_uri'):
+            # Exact RTSP URL reported by the camera via ONVIF GetStreamUri.
+            url = with_credentials(camera_info['stream_uri'], username, password)
+        else:
+            if 554 in ports:
+                port = 554
+            elif 8554 in ports:
+                port = 8554
+            elif is_reolink and 9000 in ports:
+                # Battery/WLAN Reolink without RTSP -> normalized to ReolinkProxy below.
+                port = 9000
+            else:
+                port = 554
+            url = _build_rtsp_url(
                 host=camera_info['ip'],
-                port=rtsp_port,
+                port=port,
                 username=username,
                 password=password,
-                path="h264Preview_01_main"
-            ),
+                path="h264Preview_01_main" if is_reolink else "",
+            )
+        camera_entry = {
+            'id': self._allocate_camera_id(),
+            'url': url,
             'name': camera_info['name'],
             'uid': camera_info.get('uid', ''),
             'model': camera_info.get('model', ''),
             'manufacturer': camera_info.get('manufacturer', ''),
             'detection_enabled': False,
         }
+        if camera_info.get('mac'):
+            camera_entry['mac'] = camera_info['mac']
         normalize_reolinkproxy_camera(camera_entry, username=username, password=password)
         return camera_entry
 
@@ -944,9 +926,79 @@ class MainWindow(QMainWindow):
         normalize_reolinkproxy_camera(normalized)
         return normalized
 
+    def _camera_by_id(self, camera_id) -> dict | None:
+        try:
+            camera_id = int(camera_id)
+        except (TypeError, ValueError):
+            return None
+        return next((c for c in self.cameras if int(c.get('id', -1)) == camera_id), None)
+
+    def _stop_camera_thread(self, camera_id, timeout_ms: int = 3000) -> bool:
+        """Stop and forget a camera thread. False if it is still shutting down."""
+        thread = self.camera_threads.get(camera_id)
+        if thread is None:
+            return True
+        if not thread.stop(timeout_ms=timeout_ms):
+            return False
+        del self.camera_threads[camera_id]
+        return True
+
+    def _event_clip_timing(self) -> tuple[float, float, float]:
+        """(clip, pre, post) seconds for detection event clips."""
+        clip_seconds = min(180.0, max(1.0, float(self.detection_config.get("event_clip_seconds", 30))))
+        pre_seconds = min(clip_seconds - 1.0, max(0.0, float(self.detection_config.get("pre_event_seconds", 8))))
+        return clip_seconds, pre_seconds, max(1.0, clip_seconds - pre_seconds)
+
+    def _prebuffer_seconds(self, camera_id) -> float:
+        """Pre-event buffer only for cameras with detection enabled."""
+        if not self._camera_detection_enabled(camera_id):
+            return 0.0
+        _clip, pre_seconds, _post = self._event_clip_timing()
+        return pre_seconds + 1.0 if pre_seconds > 0 else 0.0
+
+    def _apply_prebuffer(self, camera_id=None):
+        camera_ids = [camera_id] if camera_id is not None else list(self.camera_threads)
+        for cid in camera_ids:
+            thread = self.camera_threads.get(cid)
+            if thread is not None:
+                thread.set_prebuffer_seconds(self._prebuffer_seconds(cid))
+
+    def _stream_running(self, camera_id) -> bool:
+        thread = self.camera_threads.get(camera_id)
+        return thread is not None and thread.isRunning()
+
+    def refresh_proxy_status(self):
+        """Ask ReolinkProxy (RTSP DESCRIBE) about every idle proxy camera."""
+        if self._closing:
+            return
+        targets = [
+            (camera['id'], camera['url'])
+            for camera in self.cameras
+            if is_proxy_stream_url(camera.get('url', ''))
+            and not self._stream_running(camera['id'])
+            and camera['id'] not in self._proxy_checks_pending
+        ]
+        if not targets:
+            return
+        self._proxy_checks_pending.update(camera_id for camera_id, _url in targets)
+        check_proxy_streams(targets, self.proxy_status_ready.emit)
+
+    def _on_proxy_status(self, camera_id: int, status: str):
+        self._proxy_checks_pending.discard(camera_id)
+        widget = self.camera_widgets.get(camera_id)
+        if widget is None or self._is_qobject_deleted(widget):
+            return
+        widget.set_proxy_status(status)
+
     def _start_camera_thread(self, camera: dict) -> CameraThread:
         camera_id = camera['id']
-        thread = CameraThread(camera_id, camera['url'], camera.get('uid', ''))
+        thread = CameraThread(
+            camera_id,
+            camera['url'],
+            camera.get('uid', ''),
+            is_reolink=is_reolink_camera(camera),
+            prebuffer_seconds=self._prebuffer_seconds(camera_id),
+        )
         thread.frame_ready.connect(lambda frame, cid=camera_id: self.update_camera_frame(frame, cid))
         thread.connection_status.connect(lambda connected, cid, msg: self.update_camera_status(connected, cid, msg))
         thread.start()
@@ -969,57 +1021,58 @@ class MainWindow(QMainWindow):
     
     def show_discovery_dialog(self):
         """Kamera-Suche Dialog anzeigen"""
-        dialog = CameraDiscoveryDialog(self)
-        
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            selected_cameras = dialog.get_selected_cameras()
-            
-            if not selected_cameras:
-                return
-            
-            # Zugangsdaten aus Dialog
-            username = dialog.username_input.text()
-            password = dialog.password_input.text()
-            
-            added_count = 0
-            battery_cameras = []
-            
-            for camera_info in selected_cameras:
-                name = camera_info['name']
-                model = camera_info.get('model', '')
-                
-                # Check if battery camera
-                if _is_battery_camera(model, name):
-                    battery_cameras.append((name, model))
+        dialog = CameraDiscoveryDialog(self.cameras, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
 
-                camera_entry = self._build_discovered_camera_entry(camera_info, username, password)
-                
-                # Prüfe ob Kamera bereits existiert
-                if any(c['url'] == camera_entry['url'] for c in self.cameras):
-                    continue
+        selected_cameras = dialog.get_selected_cameras()
+        if not selected_cameras:
+            return
 
-                self._add_camera_entry(camera_entry)
-                
-                added_count += 1
-            
-            if added_count > 0:
-                self.update_grid_layout()
-                self.update_status_display()
-                self.save_config()
-                self.statusBar().showMessage(tr("status.auto_added", count=added_count))
-                
-                # Show battery camera warning if any detected
-                if battery_cameras:
-                    cam_list = "\n".join([f"• {name} ({model})" for name, model in battery_cameras])
-                    QMessageBox.warning(
-                        self,
-                        tr("battery.warning.title"),
-                        f"{len(battery_cameras)} {tr('battery.indicator')}:\n\n{cam_list}\n\n" + 
-                        tr("battery.warning.message", name="", model="").replace("Die Kamera '' () ist eine Akku-betriebene Kamera.", 
-                           "Diese Kameras sind Akku-betrieben.").replace("Camera '' () is battery-powered.", 
-                           "These cameras are battery-powered.")
-                    )
-    
+        # Zugangsdaten aus Dialog
+        username = dialog.username_input.text()
+        password = dialog.password_input.text()
+
+        added = []
+        for camera_info in selected_cameras:
+            if find_matching_camera(camera_info, self.cameras) is not None:
+                continue
+            camera_entry = self._build_discovered_camera_entry(camera_info, username, password)
+            if any(c['url'] == camera_entry['url'] for c in self.cameras):
+                continue
+            self._add_camera_entry(camera_entry)
+            added.append(camera_entry)
+
+        if not added:
+            return
+
+        self.update_grid_layout()
+        self.update_status_display()
+        self.save_config()
+
+        proxied = [c for c in added if c.get('proxy')]
+        message = tr("status.auto_added", count=len(added))
+        if proxied:
+            message += " " + tr("dialog.discovery.proxy_hint", count=len(proxied))
+        self.statusBar().showMessage(message)
+        self.refresh_proxy_status()
+
+        battery_cameras = [c for c in added if self._is_battery_entry(c)]
+        if battery_cameras:
+            cam_list = "\n".join(f"• {c['name']} ({c.get('model') or '-'})" for c in battery_cameras)
+            QMessageBox.warning(
+                self,
+                tr("battery.warning.title"),
+                tr("battery.warning.multi", count=len(battery_cameras), cameras=cam_list),
+            )
+
+    @staticmethod
+    def _is_battery_entry(camera: dict) -> bool:
+        proxy = camera.get('proxy') or {}
+        if proxy.get('type') == 'reolinkproxy' and proxy.get('battery'):
+            return True
+        return _is_battery_camera(camera.get('model', ''), camera.get('name', ''))
+
     def add_camera(self):
         """Kamera hinzufügen"""
         url = self.url_input.text().strip()
@@ -1063,21 +1116,15 @@ class MainWindow(QMainWindow):
     def edit_camera(self, camera_id):
         """Kamera bearbeiten"""
         # Kamera-Daten finden
-        camera_data = next((c for c in self.cameras if c['id'] == camera_id), None)
+        camera_data = self._camera_by_id(camera_id)
         if not camera_data:
             return
         
         # Stream stoppen falls aktiv
-        was_running = False
-        if camera_id in self.camera_threads:
-            thread = self.camera_threads[camera_id]
-            if thread.isRunning():
-                was_running = True
-                if thread.stop(timeout_ms=3000):
-                    del self.camera_threads[camera_id]
-                else:
-                    QMessageBox.warning(self, tr("dialog.title.error"), "Stream wird noch beendet. Bitte gleich erneut versuchen.")
-                    return
+        was_running = self._stream_running(camera_id)
+        if was_running and not self._stop_camera_thread(camera_id):
+            QMessageBox.warning(self, tr("dialog.title.error"), tr("camera.status.still_stopping"))
+            return
         
         # Edit Dialog öffnen
         dialog = CameraEditDialog(camera_data, self)
@@ -1120,7 +1167,7 @@ class MainWindow(QMainWindow):
     
     def start_single_stream(self, camera_id):
         """Einzelnen Stream starten"""
-        camera = next((c for c in self.cameras if c['id'] == camera_id), None)
+        camera = self._camera_by_id(camera_id)
         if not camera:
             return
         
@@ -1136,12 +1183,9 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr("status.stream_started", name=camera['name']))
 
     def stop_single_stream(self, camera_id):
-        if camera_id in self.camera_threads:
-            if self.camera_threads[camera_id].stop(timeout_ms=3000):
-                del self.camera_threads[camera_id]
-            else:
-                self.statusBar().showMessage("Stream wird noch beendet...")
-                return
+        if not self._stop_camera_thread(camera_id):
+            self.statusBar().showMessage(tr("camera.status.still_stopping"))
+            return
 
         if self.preview_crop_camera_id == camera_id:
             self._clear_big_preview_crop()
@@ -1167,7 +1211,7 @@ class MainWindow(QMainWindow):
     
     def remove_camera(self, camera_id):
         """Einzelne Kamera entfernen"""
-        camera = next((c for c in self.cameras if c.get('id') == camera_id), None)
+        camera = self._camera_by_id(camera_id)
         camera_name = None
         if camera:
             camera_name = camera.get('name')
@@ -1186,12 +1230,9 @@ class MainWindow(QMainWindow):
             return
 
         # Thread stoppen falls aktiv
-        if camera_id in self.camera_threads:
-            if self.camera_threads[camera_id].stop(timeout_ms=3000):
-                del self.camera_threads[camera_id]
-            else:
-                QMessageBox.warning(self, tr("dialog.title.error"), "Stream wird noch beendet. Bitte gleich erneut versuchen.")
-                return
+        if not self._stop_camera_thread(camera_id):
+            QMessageBox.warning(self, tr("dialog.title.error"), tr("camera.status.still_stopping"))
+            return
         
         # Widget entfernen
         if camera_id in self.camera_widgets:
@@ -1318,7 +1359,7 @@ class MainWindow(QMainWindow):
             if thread.isRunning()
         }
         if self.camera_threads:
-            self.statusBar().showMessage("Streams werden noch beendet...")
+            self.statusBar().showMessage(tr("status.streams_still_stopping"))
             return
         self._clear_big_preview_crop()
 
@@ -1431,10 +1472,11 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(tr("status.path", path=path))
 
     def toggle_camera_detection(self, camera_id: int, enabled: bool):
-        camera = next((c for c in self.cameras if int(c.get("id", -1)) == int(camera_id)), None)
+        camera = self._camera_by_id(camera_id)
         if camera is None:
             return
         camera["detection_enabled"] = bool(enabled)
+        self._apply_prebuffer(camera_id)
         widget = self.camera_widgets.get(camera_id)
         if widget is not None:
             widget.set_detection_active(enabled)
@@ -1470,7 +1512,7 @@ class MainWindow(QMainWindow):
     def _on_detection_status(self, message: str):
         if "deaktiviert" in message or "disabled" in message or "Modell-Laden fehlgeschlagen" in message:
             self.detection_worker = None
-            self._schedule_detection_retry(message)
+            self._schedule_detection_retry()
             self._apply_detection_visual_state()
             self.save_config()
             return
@@ -1479,7 +1521,7 @@ class MainWindow(QMainWindow):
             self._model_retry_scheduled = False
         self.statusBar().showMessage(message)
 
-    def _schedule_detection_retry(self, reason: str):
+    def _schedule_detection_retry(self):
         if not self._any_camera_detection_enabled():
             return
         if self._model_retry_scheduled:
@@ -1518,9 +1560,7 @@ class MainWindow(QMainWindow):
         clip_file = None
         thread = self.camera_threads.get(event.camera_id)
         if thread is not None:
-            clip_seconds = min(180.0, max(1.0, float(self.detection_config.get("event_clip_seconds", 30))))
-            pre_seconds = min(clip_seconds - 1.0, max(0.0, float(self.detection_config.get("pre_event_seconds", 8))))
-            post_seconds = max(1.0, clip_seconds - pre_seconds)
+            clip_seconds, pre_seconds, post_seconds = self._event_clip_timing()
             clip_file = thread.start_event_clip(
                 self.event_path,
                 event.label,

@@ -1,5 +1,8 @@
 camera_config.json
 camera_config.json.backup
+camera_config.json.*
+!camera_config.json.example
+reolinkproxy.env.*
 reolinkproxy.env
 
 __pycache__/

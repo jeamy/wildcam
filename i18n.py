@@ -161,6 +161,25 @@ TRANSLATIONS = {
                                    "Siehe README für ReolinkProxy-Konfiguration.\n\n"
                                    "Kamera trotzdem hinzufügen?",
         "battery.indicator": "🔋 AKKU",
+        "proxy.status.ready": "Proxy bereit",
+        "proxy.status.unreachable": "Proxy: Kamera nicht erreichbar",
+        "proxy.status.missing": "Nicht im Proxy – reolinkproxy.env neu erzeugen",
+        "proxy.status.proxy_down": "ReolinkProxy läuft nicht",
+        "proxy.status.error": "Proxy-Status unbekannt",
+        "proxy.status.checking": "Prüfe Proxy...",
+        "battery.warning.multi": "{count} Akku-Kameras hinzugefügt:\n\n{cameras}\n\n"
+                                 "Diese Kameras schlafen meist und sollten über ReolinkProxy laufen.\n"
+                                 "Danach reolinkproxy.env neu erzeugen und den Proxy neu starten.",
+        "dialog.discovery.col.in_list": "In Liste",
+        "dialog.discovery.proxy_hint": "{count} Reolink-Kamera(s) laufen über ReolinkProxy. "
+                                       "reolinkproxy.env neu erzeugen und den Proxy neu starten.",
+        "scan.discovery": "Netzwerk-Suche (ONVIF/SSDP)...",
+        "scan.ports": "Port-Scan {done}/{total}...",
+        "camera.status.still_stopping": "Stream wird noch beendet. Bitte gleich erneut versuchen.",
+        "camera.status.checking_path": "Prüfe Pfad: {path}...",
+        "camera.error.rtsp_disabled": "Kamera antwortet auf API (Port 8000), aber RTSP ist blockiert. "
+                                      "Bitte 'RTSP' in den Kamera-Einstellungen (Netzwerk -> Erweitert -> Servereinstellungen) aktivieren!",
+        "status.streams_still_stopping": "Streams werden noch beendet...",
     },
     "en": {
         "app.title": "Reolink Multi-Camera Viewer",
@@ -321,6 +340,25 @@ TRANSLATIONS = {
                                    "See README for ReolinkProxy configuration.\n\n"
                                    "Add camera anyway?",
         "battery.indicator": "🔋 BATTERY",
+        "proxy.status.ready": "Proxy ready",
+        "proxy.status.unreachable": "Proxy: camera unreachable",
+        "proxy.status.missing": "Not in proxy – regenerate reolinkproxy.env",
+        "proxy.status.proxy_down": "ReolinkProxy is not running",
+        "proxy.status.error": "Proxy status unknown",
+        "proxy.status.checking": "Checking proxy...",
+        "battery.warning.multi": "{count} battery cameras added:\n\n{cameras}\n\n"
+                                 "These cameras usually sleep and should run through ReolinkProxy.\n"
+                                 "Regenerate reolinkproxy.env and restart the proxy afterwards.",
+        "dialog.discovery.col.in_list": "In list",
+        "dialog.discovery.proxy_hint": "{count} Reolink camera(s) use ReolinkProxy. "
+                                       "Regenerate reolinkproxy.env and restart the proxy.",
+        "scan.discovery": "Network discovery (ONVIF/SSDP)...",
+        "scan.ports": "Port scan {done}/{total}...",
+        "camera.status.still_stopping": "Stream is still stopping. Please try again shortly.",
+        "camera.status.checking_path": "Checking path: {path}...",
+        "camera.error.rtsp_disabled": "Camera answers on its API (port 8000) but RTSP is blocked. "
+                                      "Please enable 'RTSP' in the camera settings (Network -> Advanced -> Server settings)!",
+        "status.streams_still_stopping": "Streams are still stopping...",
     },
 }
 
