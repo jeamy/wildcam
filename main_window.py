@@ -51,9 +51,10 @@ from dialogs import CameraDiscoveryDialog, CameraEditDialog
 from i18n import set_language, tr
 from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
 from proxy_status import check_proxy_streams
+from ptz import PtzController, backend_for_camera, camera_has_ptz, detect_ptz, needs_ptz_detection
 from stream import CameraThread
 from ui_resources import load_svg_icon
-from widgets import CameraListContainer, CameraWidget, PreviewLabel, letterbox_rgb, rgb_to_pixmap
+from widgets import CameraListContainer, CameraWidget, PreviewLabel, PtzPad, letterbox_rgb, rgb_to_pixmap
 
 try:
     import sip  # type: ignore
@@ -69,6 +70,8 @@ class MainWindow(QMainWindow):
     email_test_finished = pyqtSignal(bool, str)
     model_test_finished = pyqtSignal(bool, str, str)
     proxy_status_ready = pyqtSignal(int, str)
+    ptz_detected = pyqtSignal(int, str, object)  # camera_id, url at detection time, result dict
+    ptz_error = pyqtSignal(str)
     PROXY_STATUS_INTERVAL_MS = 60_000
 
     def __init__(self):
@@ -108,6 +111,12 @@ class MainWindow(QMainWindow):
         self.model_test_finished.connect(self._on_model_test_finished)
         self.proxy_status_ready.connect(self._on_proxy_status)
         self._proxy_checks_pending = set()
+        self.ptz_pad_visible = True
+        self._ptz_controllers = {}
+        self._ptz_moving_camera_id = None
+        self._ptz_detection_pending = set()
+        self.ptz_detected.connect(self._on_ptz_detected)
+        self.ptz_error.connect(lambda message: self.statusBar().showMessage(message, 5000))
         
         # Erstelle Aufzeichnungsordner
         os.makedirs(self.recording_path, exist_ok=True)
@@ -299,6 +308,15 @@ class MainWindow(QMainWindow):
         self.big_preview_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self._connect_preview_label(self.big_preview_label)
         self.big_preview_layout.addWidget(self.big_preview_label)
+
+        # Pan/tilt cross overlay (child of the persistent container, the
+        # preview labels themselves are recreated on every layout change).
+        self.ptz_pad = PtzPad(self.big_preview_container)
+        self.ptz_pad.move_requested.connect(self._on_ptz_move)
+        self.ptz_pad.stop_requested.connect(self._on_ptz_stop)
+        self.ptz_pad.visibility_toggled.connect(self._on_ptz_pad_toggled)
+        self.ptz_pad.hide()
+        self.big_preview_container.installEventFilter(self)
 
         splitter.addWidget(self.big_preview_container)
         splitter.setStretchFactor(0, 1)
@@ -990,6 +1008,126 @@ class MainWindow(QMainWindow):
             return
         widget.set_proxy_status(status)
 
+    # ------------------------------------------------------------------
+    # PTZ (pan/tilt)
+    # ------------------------------------------------------------------
+
+    def detect_missing_ptz(self, camera_ids=None):
+        """Detect pan/tilt support in the background for cameras without a stored value."""
+        for camera in list(self.cameras):
+            camera_id = camera['id']
+            if camera_ids is not None and camera_id not in camera_ids:
+                continue
+            if not needs_ptz_detection(camera) or camera_id in self._ptz_detection_pending:
+                continue
+            self._ptz_detection_pending.add(camera_id)
+            snapshot = dict(camera)
+
+            def worker(cam=snapshot):
+                try:
+                    result = detect_ptz(cam)
+                except Exception:
+                    result = None
+                try:
+                    self.ptz_detected.emit(int(cam['id']), cam.get('url', ''), result)
+                except (RuntimeError, AttributeError):
+                    pass
+
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _on_ptz_detected(self, camera_id: int, url: str, result):
+        self._ptz_detection_pending.discard(camera_id)
+        camera = self._camera_by_id(camera_id)
+        if not result or camera is None or camera.get('url') != url or camera.get('ptz_manual'):
+            return
+        camera.update(result)
+        self._drop_ptz_controller(camera_id)
+        self.save_config()
+        self._update_ptz_pad()
+
+    def _reset_ptz_detection(self, camera: dict):
+        for key in ('ptz', 'ptz_backend', 'onvif_url', 'ptz_manual'):
+            camera.pop(key, None)
+
+    def _drop_ptz_controller(self, camera_id):
+        controller = self._ptz_controllers.pop(camera_id, None)
+        if controller is not None:
+            controller.close()
+
+    def _ptz_controller(self, camera_id):
+        controller = self._ptz_controllers.get(camera_id)
+        if controller is None:
+            camera = self._camera_by_id(camera_id)
+            if camera is None:
+                return None
+            name = camera.get('name', str(camera_id))
+
+            def on_error(message, name=name):
+                try:
+                    self.ptz_error.emit(tr("ptz.error", name=name, error=message))
+                except (RuntimeError, AttributeError):
+                    pass
+
+            controller = PtzController(backend_for_camera(camera), on_error)
+            self._ptz_controllers[camera_id] = controller
+        return controller
+
+    def _active_ptz_camera_id(self):
+        camera_id = self._get_active_big_preview_camera_id()
+        camera = self._camera_by_id(camera_id) if camera_id is not None else None
+        if camera is None or not camera_has_ptz(camera):
+            return None
+        return camera['id']
+
+    def _on_ptz_move(self, direction: str):
+        camera_id = self._active_ptz_camera_id()
+        if camera_id is None:
+            return
+        controller = self._ptz_controller(camera_id)
+        if controller is not None:
+            self._ptz_moving_camera_id = camera_id
+            controller.move(direction)
+
+    def _on_ptz_stop(self):
+        camera_id = self._ptz_moving_camera_id or self._active_ptz_camera_id()
+        self._ptz_moving_camera_id = None
+        if camera_id is None:
+            return
+        controller = self._ptz_controller(camera_id)
+        if controller is not None:
+            controller.stop()
+
+    def _on_ptz_pad_toggled(self, expanded: bool):
+        self.ptz_pad_visible = bool(expanded)
+        if not expanded and self._ptz_moving_camera_id is not None:
+            self._on_ptz_stop()
+        self._position_ptz_pad()
+        self.save_config()
+
+    def _update_ptz_pad(self):
+        pad = getattr(self, "ptz_pad", None)
+        if pad is None:
+            return
+        active = self._active_ptz_camera_id()
+        if self._ptz_moving_camera_id is not None and self._ptz_moving_camera_id != active:
+            self._on_ptz_stop()
+        if active is None:
+            pad.hide()
+            return
+        pad.set_expanded(self.ptz_pad_visible)
+        pad.show()
+        self._position_ptz_pad()
+
+    def _position_ptz_pad(self):
+        pad = getattr(self, "ptz_pad", None)
+        container = getattr(self, "big_preview_container", None)
+        if pad is None or container is None or not pad.isVisible():
+            return
+        pad.adjustSize()
+        margin = 12
+        pad.move(max(0, container.width() - pad.width() - margin), max(0, container.height() - pad.height() - margin))
+        pad.raise_()
+
     def _start_camera_thread(self, camera: dict) -> CameraThread:
         camera_id = camera['id']
         thread = CameraThread(
@@ -1056,6 +1194,7 @@ class MainWindow(QMainWindow):
             message += " " + tr("dialog.discovery.proxy_hint", count=len(proxied))
         self.statusBar().showMessage(message)
         self.refresh_proxy_status()
+        self.detect_missing_ptz([c['id'] for c in added])
 
         battery_cameras = [c for c in added if self._is_battery_entry(c)]
         if battery_cameras:
@@ -1112,6 +1251,7 @@ class MainWindow(QMainWindow):
         self.update_status_display()
         self.statusBar().showMessage(tr("status.camera_added", name=camera_name))
         self.save_config()
+        self.detect_missing_ptz([camera_entry['id']])
     
     def edit_camera(self, camera_id):
         """Kamera bearbeiten"""
@@ -1133,10 +1273,11 @@ class MainWindow(QMainWindow):
             updated_data = self._normalize_edited_camera_data(camera_data, dialog.get_camera_data())
             
             # Daten aktualisieren
-            for camera in self.cameras:
-                if camera['id'] == camera_id:
-                    camera.update(updated_data)
-                    break
+            url_changed = updated_data.get('url') != camera_data.get('url')
+            camera_data.update(updated_data)
+            if url_changed and not camera_data.get('ptz_manual'):
+                self._reset_ptz_detection(camera_data)
+            self._drop_ptz_controller(camera_id)
             
             # Widget aktualisieren
             if camera_id in self.camera_widgets:
@@ -1156,6 +1297,8 @@ class MainWindow(QMainWindow):
             
             self.save_config()
             self.statusBar().showMessage(tr("status.camera_updated", name=updated_data['name']))
+            self._update_ptz_pad()
+            self.detect_missing_ptz([camera_id])
             
             # Stream neu starten falls vorher aktiv
             if was_running:
@@ -1255,7 +1398,9 @@ class MainWindow(QMainWindow):
             self._rebuild_multi_view_layout()
         
         # Aus Liste entfernen
+        self._drop_ptz_controller(camera_id)
         self.cameras = [c for c in self.cameras if c['id'] != camera_id]
+        self._update_ptz_pad()
         if not self._any_camera_detection_enabled():
             self.stop_detection()
         
@@ -1304,6 +1449,8 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
             
             self.camera_widgets.clear()
+            for camera_id in list(self._ptz_controllers):
+                self._drop_ptz_controller(camera_id)
             self.cameras.clear()
             self.next_camera_id = 1
             self.selected_camera_id = None
@@ -1311,6 +1458,7 @@ class MainWindow(QMainWindow):
             self.zoomed_camera_id = None
             self._clear_big_preview_crop()
             self._clear_big_preview_label(tr("big.select_camera"))
+            self._update_ptz_pad()
             if hasattr(self, "camera_list_container"):
                 layout = self.camera_list_container.layout_ref
                 while layout.count():
@@ -1652,6 +1800,7 @@ class MainWindow(QMainWindow):
             self.selected_camera_id = config.get('selected_camera_id')
             self._order_custom = bool(config.get('order_custom', False))
             self.next_camera_id = config.get('next_camera_id', 1)
+            self.ptz_pad_visible = bool(config.get('ptz_pad_visible', True))
 
             self.grid_cols_spin.setValue(self.cameras_per_row)
             if hasattr(self, "language_combo"):
@@ -1674,6 +1823,8 @@ class MainWindow(QMainWindow):
                 self.save_config()
             if self._any_camera_detection_enabled():
                 QTimer.singleShot(300, self._ensure_detection_worker)
+            QTimer.singleShot(2000, self.detect_missing_ptz)
+            self._update_ptz_pad()
         except Exception as e:
             print(f"Fehler beim Laden: {e}")
     
@@ -1762,6 +1913,7 @@ class MainWindow(QMainWindow):
             self.start_single_stream(camera_id)
         else:
             self._refresh_big_preview_from_last_frame(camera_id)
+        self._update_ptz_pad()
         self.save_config()
 
     def _restore_preview_state(self):
@@ -1816,6 +1968,8 @@ class MainWindow(QMainWindow):
 
     def retranslate_ui(self):
         self.setWindowTitle(tr("app.title"))
+        if hasattr(self, "ptz_pad"):
+            self.ptz_pad.retranslate_ui()
         if hasattr(self, "tabs"):
             self.tabs.setTabText(0, tr("tab.cameras"))
             self.tabs.setTabText(1, tr("tab.config"))
@@ -2084,6 +2238,7 @@ class MainWindow(QMainWindow):
 
         self._update_big_preview_selection_state()
         self._apply_detection_visual_state()
+        self._update_ptz_pad()
 
         for camera_id in selected_ids:
             widget = self.camera_widgets.get(camera_id)
@@ -2092,6 +2247,8 @@ class MainWindow(QMainWindow):
     
     def eventFilter(self, obj, event):
         """Event filter to reposition close buttons on label resize"""
+        if obj is getattr(self, "big_preview_container", None) and event.type() in (QEvent.Type.Show, QEvent.Type.Resize):
+            self._position_ptz_pad()
         if event.type() in (QEvent.Type.Show, QEvent.Type.Resize):
             # Check if this is a multi-view label
             for camera_id, label in self.multi_view_labels.items():

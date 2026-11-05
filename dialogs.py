@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 
 from camera_utils import _build_rtsp_url, camera_hosts, find_matching_camera
 from discovery import CameraDiscoveryThread
+from ptz import camera_has_ptz
 from i18n import tr
 
 
@@ -67,6 +68,12 @@ class CameraEditDialog(QDialog):
         self.uid_input.setPlaceholderText(tr("placeholder.uid"))
         uid_layout.addWidget(self.uid_input)
         layout.addLayout(uid_layout)
+
+        # PTZ (Steuerkreuz)
+        self.ptz_checkbox = QCheckBox(tr("dialog.edit.ptz"))
+        self._initial_ptz = camera_has_ptz(self.camera_data)
+        self.ptz_checkbox.setChecked(self._initial_ptz)
+        layout.addWidget(self.ptz_checkbox)
         
         # Hilfe-Text
         help_group = QGroupBox(tr("dialog.edit.help_group"))
@@ -185,6 +192,10 @@ class CameraEditDialog(QDialog):
         self.camera_data['name'] = self.name_input.text().strip()
         self.camera_data['url'] = self.url_input.text().strip()
         self.camera_data['uid'] = self.uid_input.text().strip()
+        if self.ptz_checkbox.isChecked() != self._initial_ptz:
+            # Manual choice wins over automatic detection.
+            self.camera_data['ptz'] = self.ptz_checkbox.isChecked()
+            self.camera_data['ptz_manual'] = True
         return self.camera_data
 
 

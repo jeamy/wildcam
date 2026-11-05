@@ -180,6 +180,14 @@ TRANSLATIONS = {
         "camera.error.rtsp_disabled": "Kamera antwortet auf API (Port 8000), aber RTSP ist blockiert. "
                                       "Bitte 'RTSP' in den Kamera-Einstellungen (Netzwerk -> Erweitert -> Servereinstellungen) aktivieren!",
         "status.streams_still_stopping": "Streams werden noch beendet...",
+        "ptz.toggle": "Steuerkreuz ein-/ausblenden",
+        "ptz.up": "Nach oben schwenken (gedrückt halten)",
+        "ptz.down": "Nach unten schwenken (gedrückt halten)",
+        "ptz.left": "Nach links schwenken (gedrückt halten)",
+        "ptz.right": "Nach rechts schwenken (gedrückt halten)",
+        "ptz.stop": "Bewegung stoppen",
+        "ptz.error": "PTZ-Fehler ({name}): {error}",
+        "dialog.edit.ptz": "Schwenkbar (Steuerkreuz anzeigen)",
     },
     "en": {
         "app.title": "Reolink Multi-Camera Viewer",
@@ -359,6 +367,14 @@ TRANSLATIONS = {
         "camera.error.rtsp_disabled": "Camera answers on its API (port 8000) but RTSP is blocked. "
                                       "Please enable 'RTSP' in the camera settings (Network -> Advanced -> Server settings)!",
         "status.streams_still_stopping": "Streams are still stopping...",
+        "ptz.toggle": "Show/hide pan/tilt control",
+        "ptz.up": "Tilt up (press and hold)",
+        "ptz.down": "Tilt down (press and hold)",
+        "ptz.left": "Pan left (press and hold)",
+        "ptz.right": "Pan right (press and hold)",
+        "ptz.stop": "Stop movement",
+        "ptz.error": "PTZ error ({name}): {error}",
+        "dialog.edit.ptz": "Pan/tilt camera (show control cross)",
     },
 }
 

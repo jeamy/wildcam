@@ -6,6 +6,7 @@ from PyQt6.QtCore import QMimeData, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QDrag, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -602,3 +603,85 @@ class PreviewLabel(QLabel):
         painter.setPen(QPen(QColor(76, 175, 80), 2))
         painter.fillRect(self._selection_rect, QColor(76, 175, 80, 45))
         painter.drawRect(self._selection_rect)
+
+
+class PtzPad(QWidget):
+    """Semi-transparent pan/tilt cross for the big preview.
+
+    Press and hold an arrow to move, release to stop. The small toggle
+    button collapses the cross so it does not cover the picture.
+    """
+    move_requested = pyqtSignal(str)   # "left" | "right" | "up" | "down"
+    stop_requested = pyqtSignal()
+    visibility_toggled = pyqtSignal(bool)
+
+    _BUTTON_STYLE = (
+        "QPushButton { background-color: rgba(0, 0, 0, 140); color: white; border: 1px solid rgba(255,255,255,90);"
+        " border-radius: 6px; font-size: 16px; font-weight: bold; }"
+        "QPushButton:pressed { background-color: rgba(25, 118, 210, 200); }"
+        "QPushButton:checked { background-color: rgba(25, 118, 210, 160); }"
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.cross = QWidget(self)
+        grid = QGridLayout(self.cross)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(2)
+        self.buttons = {}
+        for direction, symbol, row, col in (
+            ("up", "▲", 0, 1), ("left", "◀", 1, 0), ("right", "▶", 1, 2), ("down", "▼", 2, 1),
+        ):
+            btn = QPushButton(symbol, self.cross)
+            btn.setFixedSize(QSize(40, 40))
+            btn.setStyleSheet(self._BUTTON_STYLE)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.pressed.connect(lambda d=direction: self.move_requested.emit(d))
+            btn.released.connect(self.stop_requested.emit)
+            grid.addWidget(btn, row, col)
+            self.buttons[direction] = btn
+        stop_btn = QPushButton("■", self.cross)
+        stop_btn.setFixedSize(QSize(40, 40))
+        stop_btn.setStyleSheet(self._BUTTON_STYLE)
+        stop_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        stop_btn.clicked.connect(self.stop_requested.emit)
+        grid.addWidget(stop_btn, 1, 1)
+        self.buttons["stop"] = stop_btn
+
+        self.toggle_btn = QPushButton("✥", self)
+        self.toggle_btn.setCheckable(True)
+        self.toggle_btn.setChecked(True)
+        self.toggle_btn.setFixedSize(QSize(32, 26))
+        self.toggle_btn.setStyleSheet(self._BUTTON_STYLE)
+        self.toggle_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.toggle_btn.toggled.connect(self._on_toggled)
+
+        layout.addWidget(self.cross)
+        layout.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignRight)
+        self.retranslate_ui()
+
+    def set_expanded(self, expanded: bool):
+        self.toggle_btn.blockSignals(True)
+        self.toggle_btn.setChecked(expanded)
+        self.toggle_btn.blockSignals(False)
+        self.cross.setVisible(expanded)
+        self.adjustSize()
+
+    def is_expanded(self) -> bool:
+        return self.toggle_btn.isChecked()
+
+    def _on_toggled(self, checked: bool):
+        self.cross.setVisible(checked)
+        self.adjustSize()
+        self.visibility_toggled.emit(checked)
+
+    def retranslate_ui(self):
+        self.toggle_btn.setToolTip(tr("ptz.toggle"))
+        for direction in ("up", "down", "left", "right"):
+            self.buttons[direction].setToolTip(tr(f"ptz.{direction}"))
+        self.buttons["stop"].setToolTip(tr("ptz.stop"))

@@ -344,6 +344,23 @@ Important:
 - WildCam writes and updates `reolinkproxy.env`, but the actual ReolinkProxy must run separately.
 - The recommended setup in this repository is the Docker Compose stack from `docker-compose.yml`.
 
+### Pan/tilt (PTZ) control
+
+When the selected camera can pan/tilt, a control cross appears in the
+bottom-right corner of the big preview: press and hold an arrow to move,
+release to stop. The ✥ button collapses/expands the cross (remembered).
+
+Detection (runs once in the background, stored as `"ptz"` per camera):
+
+- **ONVIF cameras** (e.g. Tapo): PTZ service + PTZ profile → pan/tilt
+- **Native Reolink cameras**: `GetAbility` (`ptzCtrl`/`ptzType`)
+- **ReolinkProxy cameras**: the proxy reports PTZ for every camera, so they
+  count as pan/tilt by default; control goes through the proxy's ONVIF PTZ
+  service (requires ReolinkProxy **0.2.7 or newer**)
+
+The automatic result can be overridden per camera in the edit dialog
+(*Pan/tilt camera*).
+
 ## Battery Cameras
 
 ### Automatic ReolinkProxy Setup
