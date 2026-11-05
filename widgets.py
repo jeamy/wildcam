@@ -1,6 +1,7 @@
 from datetime import datetime
 
 import cv2
+import numpy as np
 from PyQt6.QtCore import QMimeData, QRect, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QDrag, QImage, QPainter, QPen, QPixmap
 from PyQt6.QtWidgets import (
@@ -88,6 +89,54 @@ class CameraListContainer(QWidget):
         QTimer.singleShot(0, lambda: self.order_changed.emit(ordered_ids))
 
 
+def letterbox_rgb(frame, display_w: int, display_h: int, crop_rect: QRect | None = None):
+    """Scale a BGR frame (optionally cropped) into display_w x display_h,
+    keeping the aspect ratio. Returns (rgb_array, content_rect) or (None, None)."""
+    display_w = max(1, int(display_w))
+    display_h = max(1, int(display_h))
+    src_h, src_w = frame.shape[:2]
+    if src_w <= 0 or src_h <= 0:
+        return None, None
+
+    crop_x, crop_y, crop_w, crop_h = 0, 0, src_w, src_h
+    if crop_rect is not None:
+        crop_x = max(0, min(src_w - 1, crop_rect.x()))
+        crop_y = max(0, min(src_h - 1, crop_rect.y()))
+        crop_w = max(1, min(src_w - crop_x, crop_rect.width()))
+        crop_h = max(1, min(src_h - crop_y, crop_rect.height()))
+
+    frame_view = frame[crop_y:crop_y + crop_h, crop_x:crop_x + crop_w]
+    if frame_view.size == 0:
+        return None, None
+
+    scale = min(display_w / crop_w, display_h / crop_h)
+    new_w = max(1, int(crop_w * scale))
+    new_h = max(1, int(crop_h * scale))
+    rgb_small = cv2.cvtColor(cv2.resize(frame_view, (new_w, new_h)), cv2.COLOR_BGR2RGB)
+    rgb = np.zeros((display_h, display_w, 3), dtype=np.uint8)
+    x = (display_w - new_w) // 2
+    y = (display_h - new_h) // 2
+    rgb[y:y + new_h, x:x + new_w] = rgb_small
+    return rgb, QRect(x, y, new_w, new_h)
+
+
+def rgb_to_pixmap(rgb) -> QPixmap:
+    h, w, ch = rgb.shape
+    image = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(1.0)
+    return pixmap
+
+
+PROXY_STATUS_COLORS = {
+    "ready": "#4caf50",
+    "unreachable": "#ff9800",
+    "missing": "#e53935",
+    "proxy_down": "#e53935",
+    "error": "#999",
+}
+
+
 class CameraWidget(QWidget):
     """Widget für einzelne Kamera-Anzeige"""
     clicked = pyqtSignal(int)
@@ -110,6 +159,7 @@ class CameraWidget(QWidget):
         self._video_dragging = False
         self.is_selected_for_view = False
         self.detection_active = False
+        self.proxy_status = None
         
         layout = QVBoxLayout()
         layout.setContentsMargins(2, 2, 2, 2)
@@ -158,13 +208,11 @@ class CameraWidget(QWidget):
         self.video_label.mouseMoveEvent = self._on_video_mouse_move
         self.video_label.mouseReleaseEvent = self._on_video_mouse_release
         
-        # Info Label mit FPS und Battery-Indikator
-        battery_indicator = f" {tr('battery.indicator')}" if is_battery else ""
-        self.info_label = QLabel(f"{self.camera_name}{battery_indicator} - {tr('camera.status.offline')}")
-        label_color = "#ff9800" if is_battery else "red"
-        self.info_label.setStyleSheet(f"color: {label_color}; font-weight: bold; font-size: 11px;")
+        # Info Label mit Status und Battery-Indikator
+        self.info_label = QLabel()
         self.info_label.setWordWrap(False)
         self.info_label.setFixedHeight(18)
+        self._show_idle_status()
         
         # Button Layout
         btn_layout = QVBoxLayout()
@@ -328,44 +376,60 @@ class CameraWidget(QWidget):
         fps = 1.0 / (now - self.last_frame_time).total_seconds() if (now - self.last_frame_time).total_seconds() > 0 else 0
         self.last_frame_time = now
         
-        # Resize für Display
-        display_w = max(1, self.video_label.width())
-        display_h = max(1, self.video_label.height())
-        frame_resized = cv2.resize(frame, (display_w, display_h))
-        
-        # Convert BGR to RGB
-        rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
-        
+        rgb_frame, _rect = letterbox_rgb(frame, self.video_label.width(), self.video_label.height())
+        if rgb_frame is None:
+            return
+        display_w = rgb_frame.shape[1]
+
         # Aufnahme-Indikator
         if self.recording:
             cv2.circle(rgb_frame, (20, 20), 8, (255, 0, 0), -1)
             cv2.putText(rgb_frame, "REC", (35, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
-        
+
         # FPS anzeigen
-        cv2.putText(rgb_frame, f"{fps:.1f} FPS", (display_w - 80, 25), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-        
-        # Convert to QImage
-        h, w, ch = rgb_frame.shape
-        bytes_per_line = ch * w
-        qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
-        
-        self.video_label.setPixmap(QPixmap.fromImage(qt_image))
-    
+        cv2.putText(rgb_frame, f"{fps:.1f} FPS", (display_w - 80, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        self.video_label.setPixmap(rgb_to_pixmap(rgb_frame))
+
+    def _set_info(self, text: str, color: str, tooltip: str = ""):
+        self.info_label.setText(text)
+        self.info_label.setToolTip(tooltip or text)
+        self.info_label.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px;")
+
+    def _show_idle_status(self):
+        """Status line while no stream is running (proxy status if known)."""
+        battery = f" {tr('battery.indicator')}" if self.is_battery else ""
+        if self.proxy_status:
+            text = tr(f"proxy.status.{self.proxy_status}")
+            color = PROXY_STATUS_COLORS.get(self.proxy_status, "#999")
+        else:
+            text = tr("camera.status.offline")
+            color = "#ff9800" if self.is_battery else "red"
+        self._set_info(f"{self.camera_name}{battery} - {text}", color)
+
+    def set_proxy_status(self, status: str | None):
+        """Show the ReolinkProxy status; never overrides a running stream's status."""
+        self.proxy_status = status
+        if not self.stream_active:
+            self._show_idle_status()
+
     def update_status(self, connected, message):
         """Status aktualisieren"""
         if connected:
-            self.info_label.setText(f"{self.camera_name} - {message}")
-            self.info_label.setStyleSheet("color: green; font-weight: bold; font-size: 11px;")
+            self._set_info(f"{self.camera_name} - {message}", "green")
             self.record_btn.setEnabled(True)
+            return
+        self.record_btn.setEnabled(False)
+        if self.stream_active:
+            self._set_info(f"{self.camera_name} - {message}", "red")
+            self.video_label.setText(f"{self.camera_name}\n{message}\n{tr('camera.preview.retrying')}")
         else:
-            self.info_label.setText(f"{self.camera_name} - {message}")
-            self.info_label.setStyleSheet("color: red; font-weight: bold; font-size: 11px;")
-            self.record_btn.setEnabled(False)
-            if self.stream_active:
-                self.video_label.setText(f"{self.camera_name}\n{message}\n{tr('camera.preview.retrying')}")
+            if self.proxy_status:
+                self._show_idle_status()
             else:
-                self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
+                self._set_info(f"{self.camera_name} - {message}", "red")
+            self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
     
     def toggle_recording(self):
         """Aufnahme umschalten"""
@@ -404,6 +468,7 @@ class CameraWidget(QWidget):
         self.edit_btn.setToolTip(tr("camera.tooltip.edit"))
         self.remove_btn.setToolTip(tr("camera.tooltip.remove"))
         if not self.stream_active:
+            self._show_idle_status()
             self.video_label.setText(f"{self.camera_name}\n{tr('camera.preview.click_to_start')}")
 
     def _request_snapshot(self):

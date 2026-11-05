@@ -56,27 +56,18 @@ def _normalize_rtsp_url(rtsp_url: str) -> str:
         return rtsp_url
 
 
+# Known battery-powered Reolink series, matched as whole words so names like
+# "Garage" or "Logo" do not count ("go" used to match any substring).
+_BATTERY_PATTERN = re.compile(r"\b(argus|go|altas|battery|solar|akku)\b", re.IGNORECASE)
+
+
 def _is_battery_camera(model: str, name: str = "") -> bool:
     """Check if camera is battery-powered based on model/name."""
-    if not model and not name:
-        return False
-    
-    search_text = f"{model} {name}".lower()
-    
-    # Known battery camera series/models
-    battery_keywords = [
-        "argus",      # Argus series (Argus 2, 3, PT, Eco, Ultra)
-        "go",         # Go series (Go, Go Plus, Go PT)
-        "altas",      # Altas PT Ultra
-        "battery",    # Explicit battery mention
-        "solar",      # Solar-powered (usually battery)
-    ]
-    
-    return any(keyword in search_text for keyword in battery_keywords)
+    return bool(_BATTERY_PATTERN.search(f"{model or ''} {name or ''}"))
 
 
 def _build_rtsp_url(host: str, port: int = 554, username: str = "", password: str = "", 
-                    path: str = "h264Preview_01_main", scheme: str = "rtsp") -> str:
+                    path: str | None = "h264Preview_01_main", scheme: str = "rtsp") -> str:
     """Build RTSP URL with proper URL-encoding for credentials containing special characters.
     
     Args:
@@ -103,16 +94,151 @@ def _build_rtsp_url(host: str, port: int = 554, username: str = "", password: st
     else:
         auth = ""
     
+    path = path or ""
     # Ensure path starts with /
-    if path and not path.startswith('/'):
+    if not path.startswith('/'):
         path = f"/{path}"
     
     return f"{scheme}://{auth}{host}:{port}{path}"
 
 
+PROXY_RTSP_HOSTS = ("localhost", "127.0.0.1")
+PROXY_RTSP_PORT = 8554
+
+
+def is_proxy_stream_url(rtsp_url: str) -> bool:
+    """True if the URL points at the local ReolinkProxy RTSP server."""
+    host, port, _user, _password = _parse_rtsp_url(rtsp_url or "")
+    return host in PROXY_RTSP_HOSTS and int(port or 0) == PROXY_RTSP_PORT
+
+
+# Result codes of rtsp_describe_status()
+PROXY_READY = "ready"            # 200: stream registered, proxy has connected before
+PROXY_UNREACHABLE = "unreachable"  # 503/timeout: proxy cannot reach the camera
+PROXY_MISSING = "missing"        # 404: camera not configured in reolinkproxy.env
+PROXY_DOWN = "proxy_down"        # RTSP listener not reachable
+PROXY_ERROR = "error"
+
+
+def rtsp_describe_status(rtsp_url: str, timeout: float = 12.0) -> str:
+    """Send a single RTSP DESCRIBE and classify the answer.
+
+    Against ReolinkProxy this does not wake a sleeping camera: registered
+    streams answer from the cached SDP, unreachable ones answer 503.
+    """
+    host, port, _user, _password = _parse_rtsp_url(rtsp_url or "")
+    if not host:
+        return PROXY_ERROR
+    try:
+        sock = socket.create_connection((host, int(port or 554)), timeout=min(timeout, 3.0))
+    except ConnectionRefusedError:
+        return PROXY_DOWN
+    except OSError:
+        return PROXY_DOWN
+    try:
+        sock.settimeout(timeout)
+        request = (
+            f"DESCRIBE {rtsp_url} RTSP/1.0\r\n"
+            "CSeq: 1\r\n"
+            "Accept: application/sdp\r\n"
+            "User-Agent: WildCam\r\n\r\n"
+        )
+        sock.sendall(request.encode("utf-8"))
+        first_line = sock.recv(1024).decode("utf-8", "ignore").split("\r\n", 1)[0]
+    except (TimeoutError, socket.timeout):
+        return PROXY_UNREACHABLE
+    except OSError:
+        return PROXY_ERROR
+    finally:
+        sock.close()
+    parts = first_line.split()
+    code = parts[1] if len(parts) > 1 else ""
+    if code == "200":
+        return PROXY_READY
+    if code == "404":
+        return PROXY_MISSING
+    if code in ("503", "500", "504"):
+        return PROXY_UNREACHABLE
+    return PROXY_ERROR
+
+
+def is_reolink_camera(camera: dict) -> bool:
+    """Heuristic: does this camera need the Reolink wake-up / path fallbacks?"""
+    if (camera.get("manufacturer") or "").lower() == "reolink":
+        return True
+    if "reolink" in (camera.get("model") or "").lower():
+        return True
+    if (camera.get("uid") or "").startswith("9527"):
+        return True
+    if (camera.get("proxy") or {}).get("type") == "reolinkproxy":
+        return True
+    url = camera.get("url") or ""
+    return "Preview_01_" in url or _parse_rtsp_url(url)[1] == 9000
+
+
+def with_credentials(uri: str, username: str = "", password: str = "") -> str:
+    """Insert (URL-encoded) credentials into an RTSP URI, keeping path and query."""
+    u = urlparse(uri, allow_fragments=False)
+    if not u.hostname:
+        return uri
+    path = u.path or "/"
+    if u.query:
+        path = f"{path}?{u.query}"
+    return _build_rtsp_url(
+        host=u.hostname,
+        port=u.port or 554,
+        username=username,
+        password=password,
+        path=path,
+        scheme=u.scheme or "rtsp",
+    )
+
+
+def camera_hosts(camera: dict) -> set[str]:
+    """Network addresses a configured camera is known under (URL host, proxy host)."""
+    hosts = set()
+    host, _port, _user, _password = _parse_rtsp_url(camera.get("url") or "")
+    if host and host not in PROXY_RTSP_HOSTS:
+        hosts.add(host)
+    proxy_host = (camera.get("proxy") or {}).get("host")
+    if proxy_host:
+        hosts.add(proxy_host)
+    return hosts
+
+
+def find_matching_camera(info: dict, cameras: list[dict]) -> dict | None:
+    """Find a configured camera matching a discovery result.
+
+    Order: UID (stable, Reolink), MAC (survives DHCP changes), then IP.
+    """
+    uid = (info.get("uid") or "").strip().lower()
+    mac = (info.get("mac") or "").strip().lower()
+    ip = info.get("ip") or ""
+    if uid:
+        for camera in cameras:
+            if (camera.get("uid") or "").strip().lower() == uid:
+                return camera
+    if mac:
+        for camera in cameras:
+            if (camera.get("mac") or "").strip().lower() == mac:
+                return camera
+    if ip:
+        for camera in cameras:
+            if ip in camera_hosts(camera):
+                return camera
+    return None
+
+
 def _reolinkproxy_camera_name(name: str) -> str:
-    """Normalize camera name for ReolinkProxy stream path."""
-    return (name or "Camera").strip().replace(" ", "_")
+    """Normalize camera name for ReolinkProxy stream path.
+
+    Spaces become "_", characters that would break an RTSP path segment
+    ("/", "?", "#", "%", quotes, control chars) are replaced as well. Plain
+    names like "D58" stay unchanged.
+    """
+    cleaned = (name or "Camera").strip().replace(" ", "_")
+    cleaned = re.sub(r"[/\\?#%\"'<>\x00-\x1f]", "_", cleaned)
+    return cleaned or "Camera"
 
 
 def _reolinkproxy_rtsp_url(name: str, port: int = 8554) -> str:
@@ -120,11 +246,11 @@ def _reolinkproxy_rtsp_url(name: str, port: int = 8554) -> str:
     return f"rtsp://localhost:{port}/{cam_name}/mainStream"
 
 
-def _reolinkproxy_proxy_config(rtsp_url: str, name: str, username: str, password: str, uid: str = "", model: str = "", manufacturer: str = "") -> dict | None:
+def _reolinkproxy_proxy_config(rtsp_url: str, name: str, username: str, password: str, model: str = "", manufacturer: str = "") -> dict | None:
     """Build a persistent proxy config for Reolink WLAN/Battery cameras."""
-    host, port, user, pwd = _parse_rtsp_url(rtsp_url)
-    if host in ("localhost", "127.0.0.1") and port == 8554:
+    if is_proxy_stream_url(rtsp_url):
         return None
+    host, port, user, pwd = _parse_rtsp_url(rtsp_url)
 
     is_reolink = (
         (manufacturer or "").lower() == "reolink"
@@ -163,7 +289,6 @@ def normalize_reolinkproxy_camera(camera: dict, username: str = "", password: st
         name=camera.get("name", ""),
         username=username,
         password=password,
-        uid=camera.get("uid", ""),
         model=camera.get("model", ""),
         manufacturer=camera.get("manufacturer", ""),
     )
@@ -199,151 +324,6 @@ def _tcp_probe(host: str, port: int, timeout: float = 0.7) -> tuple[bool, str]:
         if getattr(e, "errno", None) in (101, 113):
             return False, "unreachable"
         return False, "error"
-
-
-def _ws_discovery(timeout: float = 2.0) -> list[str]:
-    """ONVIF/WS-Discovery (UDP 3702)."""
-    msg = (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        '<Envelope xmlns:tds="http://www.onvif.org/ver10/device/wsdl" xmlns="http://www.w3.org/2003/05/soap-envelope">'
-        '<Header><MessageID xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">uuid:8253()</MessageID>'
-        '<To xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">urn:schemas-xmlsoap-org:ws:2004:08:discovery</To>'
-        '<Action xmlns="http://schemas.xmlsoap.org/ws/2004/08/addressing">http://schemas.xmlsoap.org/ws/2004/08/discovery/Probe</Action></Header>'
-        '<Body><Probe xmlns="http://schemas.xmlsoap.org/ws/2004/08/discovery"><Types>tds:Device</Types></Probe></Body></Envelope>'
-    )
-    ips = set()
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.settimeout(timeout)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        sock.sendto(msg.encode(), ("239.255.255.250", 3702))
-        
-        while True:
-            try:
-                data, addr = sock.recvfrom(4096)
-                ips.add(addr[0])
-            except socket.timeout:
-                break
-    except Exception:
-        pass
-    finally:
-        if sock is not None:
-            sock.close()
-    return list(ips)
-
-
-def _ssdp_discovery(timeout: float = 2.0) -> list[str]:
-    """UPnP/SSDP Discovery (UDP 1900)."""
-    msg = (
-        'M-SEARCH * HTTP/1.1\r\n'
-        'HOST: 239.255.255.250:1900\r\n'
-        'MAN: "ssdp:discover"\r\n'
-        'MX: 2\r\n'
-        'ST: ssdp:all\r\n'
-        '\r\n'
-    )
-    ips = set()
-    sock = None
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.settimeout(timeout)
-        sock.sendto(msg.encode(), ("239.255.255.250", 1900))
-        
-        while True:
-            try:
-                data, addr = sock.recvfrom(4096)
-                ips.add(addr[0])
-            except socket.timeout:
-                break
-    except Exception:
-        pass
-    finally:
-        if sock is not None:
-            sock.close()
-    return list(ips)
-
-
-def _udp_reolink_probe(ip: str, timeout: float = 2.0) -> list | dict | None:
-    """Sendet ein Reolink UDP Discovery Paket an eine spezifische oder Broadcast IP."""
-    ports = [9000, 10000, 2000]
-    
-    # Discovery JSON Payloads (GetDevInfo und Search)
-    payloads = [
-        [{"cmd": "GetDevInfo", "action": 0, "param": {}}],
-        {"cmd": "GetDevInfo", "action": 0, "param": {}},
-        [{"cmd": "Search", "action": 0, "param": {}}],
-        {"cmd": "Search", "action": 0, "param": {}}
-    ]
-    
-    results = []
-    
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    sock.settimeout(timeout)
-    if ip == "255.255.255.255":
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-    for port in ports:
-        for cmd_data in payloads:
-            data = json.dumps(cmd_data).encode('utf-8')
-            for endian in ['<', '>']:
-                header = struct.pack(endian + "2sHHHII", b"BC", 0, 1, 0, len(data), 0)
-                payload = header + data
-                try:
-                    # Weck-Schuss
-                    sock.sendto(b"\x00" * 32, (ip, port))
-                    sock.sendto(payload, (ip, port))
-                    
-                    while True:
-                        try:
-                            resp_data, addr = sock.recvfrom(4096)
-                        except socket.timeout:
-                            break
-                            
-                        if len(resp_data) >= 16:
-                            idx = -1
-                            for i in range(len(resp_data) - 1):
-                                if resp_data[i:i+2].lower() == b"bc":
-                                    for j in range(i+2, min(i+48, len(resp_data))):
-                                        if resp_data[j] in (ord('['), ord('{')):
-                                            idx = j
-                                            break
-                                    if idx != -1:
-                                        break
-                            
-                            if idx != -1:
-                                content = resp_data[idx:].decode('utf-8', 'ignore')
-                                if content.startswith('['):
-                                    end = content.rfind(']')
-                                else:
-                                    end = content.rfind('}')
-                                
-                                if end != -1:
-                                    try:
-                                        res = json.loads(content[:end+1])
-                                        info = None
-                                        # Wir suchen nach DevInfo oder Search-Response
-                                        val = res[0].get('value', {}) if isinstance(res, list) else res.get('value', {})
-                                        info = val.get('DevInfo') or val.get('SearchResult') or val
-                                        
-                                        if info and (info.get('name') or info.get('serial') or info.get('mac')):
-                                            info['remote_ip'] = addr[0]
-                                            if ip != "255.255.255.255":
-                                                sock.close()
-                                                return info
-                                            if info.get('remote_ip') not in [r.get('remote_ip') for r in results]:
-                                                results.append(info)
-                                    except Exception:
-                                        pass
-                        if ip != "255.255.255.255":
-                            break
-                except Exception:
-                    break
-            if ip != "255.255.255.255" and results:
-                break
-    
-    sock.close()
-    return results if ip == "255.255.255.255" else (results[0] if results else None)
 
 
 def _udp_reolink_wake(ip: str, uid: str = ""):

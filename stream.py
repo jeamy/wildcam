@@ -3,7 +3,6 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
-from urllib.parse import urlparse
 
 import cv2
 import numpy as np
@@ -16,6 +15,7 @@ from camera_utils import (
     _parse_rtsp_url,
     _tcp_probe,
     _udp_reolink_wake,
+    is_proxy_stream_url,
 )
 from i18n import tr
 
@@ -25,7 +25,7 @@ class CameraThread(QThread):
     frame_ready = pyqtSignal(np.ndarray, int)
     connection_status = pyqtSignal(bool, int, str)
     
-    def __init__(self, camera_id, rtsp_url, uid=""):
+    def __init__(self, camera_id, rtsp_url, uid="", is_reolink=True, prebuffer_seconds=0.0):
         super().__init__()
         self.camera_id = camera_id
         # Normalize URL to ensure explicit port (prevents FFmpeg TCP fallback errors)
@@ -41,11 +41,16 @@ class CameraThread(QThread):
         self._writer_lock = threading.Lock()
         self._buffer_lock = threading.Lock()
         self._frame_buffer = deque()
-        self._frame_buffer_seconds = 12.0
+        # Pre-event ring buffer (full frames!). 0 = off; only needed while
+        # object detection is enabled for this camera.
+        self._frame_buffer_seconds = max(0.0, float(prebuffer_seconds))
         self.cap = None
         self.reconnect_delay = 5  # Mehr Zeit für Akku-Kameras
-        self._host, self._port, self._user, self._password = _parse_rtsp_url(rtsp_url)
-        self._is_proxy_stream = self._host in ("localhost", "127.0.0.1") and int(self._port or 0) == 8554
+        self._host, self._port, _user, _password = _parse_rtsp_url(rtsp_url)
+        self._is_proxy_stream = is_proxy_stream_url(rtsp_url)
+        # Wake-up burst and Reolink path fallbacks only make sense for
+        # native Reolink cameras (not for Tapo & co. or the proxy).
+        self._is_reolink = bool(is_reolink) and not self._is_proxy_stream
         if self._is_proxy_stream:
             self.reconnect_delay = 2
         
@@ -72,10 +77,7 @@ class CameraThread(QThread):
 
             if self.running:
                 self.connection_status.emit(False, self.camera_id, tr("camera.preview.retrying"))
-                for _ in range(int(self.reconnect_delay * 10)):
-                    if not self.running:
-                        break
-                    self.msleep(100)
+                self._wait_before_reconnect(self.reconnect_delay)
         
         self._cleanup()
 
@@ -112,13 +114,13 @@ class CameraThread(QThread):
     def _connect_and_stream(self):
         """Verbindung herstellen und streamen"""
         # Best-effort wake attempt for sleeping/battery cameras
-        if self._host and not self._is_proxy_stream:
+        if self._host and self._is_reolink:
             # Intensiv-Weckphase (für Akku-Kameras wie Argus PT Ultra)
             # Wir wiederholen das Wecken und prüfen die Erreichbarkeit über mind. 10 Sek.
             self.connection_status.emit(False, self.camera_id, tr("camera.preview.waiting"))
             
             wake_ok = False
-            for attempt in range(10):  # 10 Versuche alle ~1s = ca. 10s total
+            for _ in range(10):  # 10 Versuche alle ~1s = ca. 10s total
                 if not self.running:
                     break
                 
@@ -161,26 +163,27 @@ class CameraThread(QThread):
         
         # Falls eine native Kamera nicht öffnet, probieren wir Reolink-typische Varianten.
         # Bei ReolinkProxy-URLs ist der Pfad absichtlich fix (<Name>/mainStream).
-        if not self.cap.isOpened() and not self._is_proxy_stream:
+        if not self.cap.isOpened() and self._is_reolink:
             # Parse URL properly to rebuild with alternative paths
             try:
-                u = urlparse(self.rtsp_url)
-                port = u.port or 554
-                
+                # _parse_rtsp_url decodes the credentials, _build_rtsp_url encodes
+                # them again exactly once (urlparse would keep "%23" -> "%2523").
+                host, port, user, password = _parse_rtsp_url(self.rtsp_url)
+                scheme = self.rtsp_url.split("://", 1)[0] or "rtsp"
+
                 for path in self._alt_paths:
-                    # Use _build_rtsp_url to properly encode credentials
                     test_url = _build_rtsp_url(
-                        host=u.hostname,
+                        host=host,
                         port=port,
-                        username=u.username or '',
-                        password=u.password or '',
+                        username=user or '',
+                        password=password or '',
                         path=path,
-                        scheme=u.scheme
+                        scheme=scheme,
                     )
                     if test_url == self.rtsp_url:
                         continue
                     
-                    self.connection_status.emit(False, self.camera_id, f"Prüfe Pfad: {path}...")
+                    self.connection_status.emit(False, self.camera_id, tr("camera.status.checking_path", path=path))
                     self.cap = self._open_capture(test_url, open_timeout_ms, read_timeout_ms)
                     if self.cap.isOpened():
                         self.rtsp_url = test_url
@@ -190,16 +193,14 @@ class CameraThread(QThread):
         
         if not self.cap.isOpened():
             # Diagnostik: Wenn RTSP zu ist, aber Port 8000 offen, ist RTSP wahrscheinlich in der Kamera deaktiviert
-            if self._host and not self._is_proxy_stream:
+            if self._host and self._is_reolink:
                 ok_api, _ = _tcp_probe(self._host, 8000, timeout=0.5)
                 if ok_api:
-                    raise Exception("Kamera antwortet auf API (Port 8000), aber RTSP ist blockiert. Bitte 'RTSP' in den Kamera-Einstellungen (Netzwerk -> Fortgeschritten -> Servereinstellungen) aktivieren!")
+                    raise Exception(tr("camera.error.rtsp_disabled"))
             raise Exception(tr("camera.error.stream_unreachable"))
         
-        # Optimierungen für geringe Latenz
+        # Optimierungen für geringe Latenz (CAP_PROP_FPS hat bei RTSP keine Wirkung)
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        if not self._is_proxy_stream:
-            self.cap.set(cv2.CAP_PROP_FPS, 25)
         
         self.connection_status.emit(True, self.camera_id, tr("camera.status.connected"))
         
@@ -244,7 +245,16 @@ class CameraThread(QThread):
             
             self.msleep(5 if self._is_proxy_stream else 10)
 
+    def set_prebuffer_seconds(self, seconds: float):
+        """Size of the pre-event buffer; 0 disables it and frees the memory."""
+        with self._buffer_lock:
+            self._frame_buffer_seconds = max(0.0, float(seconds))
+            if self._frame_buffer_seconds <= 0:
+                self._frame_buffer.clear()
+
     def _remember_frame(self, frame):
+        if self._frame_buffer_seconds <= 0:
+            return
         now = time.monotonic()
         with self._buffer_lock:
             self._frame_buffer.append((now, frame.copy()))

@@ -310,10 +310,32 @@ WildCam will automatically:
 
 Open **Auto-Discover**, choose your network (e.g. `192.168.1.0/24`), enter credentials, and start the scan.
 
-When you add found Reolink WLAN/battery cameras, WildCam will automatically:
+The scan combines:
 
-- update `reolinkproxy.env`
-- store `localhost:8554/...` URLs in `camera_config.json`
+- **ONVIF WS-Discovery** (name/model; with credentials also the exact RTSP URL via `GetStreamUri`)
+- a parallel **port scan** (554, 8554, 80, 443, 8000, 9000, 2020, 8899)
+- the **Reolink HTTP API** (vendor; with credentials model, name and P2P UID)
+
+Hosts of cameras already in your list are scanned a second time with a longer
+timeout (WLAN cameras often miss the fast scan). Results are matched against
+the list by UID, MAC and IP; matches are shown in the *In list* column and are
+not pre-selected. The ReolinkProxy host itself is ignored.
+
+When you add found Reolink WLAN/battery cameras (port 9000 only, or a battery
+model), WildCam stores `localhost:8554/...` URLs plus a `proxy` block in
+`camera_config.json`. Regenerate `reolinkproxy.env` (`python3 reolinkproxy_manager.py`,
+done automatically by `start_wildcam.sh`) and restart the proxy afterwards;
+until then the camera shows *Not in proxy*.
+
+### ReolinkProxy status
+
+For idle proxy cameras WildCam asks ReolinkProxy every 60 s with an RTSP
+`DESCRIBE` (this does not wake the camera). The camera tile shows:
+
+- *Proxy ready* – stream registered, the proxy has connected before (the camera may be asleep)
+- *Camera unreachable* – the proxy cannot reach the camera (e.g. UID discovery timed out)
+- *Not in proxy* – camera missing from `reolinkproxy.env`
+- *ReolinkProxy is not running* – nothing listens on port 8554
 
 ReolinkProxy is a **proxy** and does not magically discover/wake sleeping cameras. The camera still needs to be reachable (awake) for discovery and for ReolinkProxy to connect.
 

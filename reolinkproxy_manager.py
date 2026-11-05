@@ -13,40 +13,16 @@ from camera_utils import (
     _reolinkproxy_camera_name,
     _reolinkproxy_proxy_config,
     _reolinkproxy_rtsp_url,
+    is_proxy_stream_url,
 )
-
-
-def parse_rtsp_url(rtsp_url):
-    host, port, username, password = _parse_rtsp_url(rtsp_url or "")
-    if not host:
-        return None
-    return {
-        "host": host,
-        "port": port,
-        "username": username or "",
-        "password": password or "",
-        "scheme": "rtsp",
-    }
-
-
-def camera_name(name):
-    return _reolinkproxy_camera_name(name)
-
-
-def is_proxy_url(rtsp_url):
-    info = parse_rtsp_url(rtsp_url or "")
-    return bool(info and info["host"] in ("localhost", "127.0.0.1") and info["port"] == 8554)
 
 
 def is_reolinkproxy_camera(camera):
     proxy = camera.get("proxy") or {}
     if proxy.get("type") == "reolinkproxy":
         return True
-
-    url_info = parse_rtsp_url(camera.get("url", ""))
-    if url_info and url_info["port"] == 9000:
-        return True
-    return False
+    _host, port, _user, _password = _parse_rtsp_url(camera.get("url", ""))
+    return port == 9000
 
 
 def env_value(value):
@@ -61,7 +37,6 @@ def make_proxy_from_rtsp(camera):
         name=camera.get("name", ""),
         username="",
         password="",
-        uid=camera.get("uid", ""),
         model=camera.get("model", ""),
         manufacturer=camera.get("manufacturer", ""),
     )
@@ -78,10 +53,10 @@ def write_env(cameras, output_path):
     proxy_cameras = [cam for cam in cameras if is_reolinkproxy_camera(cam)]
     incomplete_proxy_cameras = [
         cam for cam in cameras
-        if is_proxy_url(cam.get("url", "")) and (cam.get("proxy") or {}).get("type") != "reolinkproxy"
+        if is_proxy_stream_url(cam.get("url", "")) and (cam.get("proxy") or {}).get("type") != "reolinkproxy"
     ]
     if incomplete_proxy_cameras:
-        names = ", ".join(camera_name(cam.get("name", "")) for cam in incomplete_proxy_cameras)
+        names = ", ".join(_reolinkproxy_camera_name(cam.get("name", "")) for cam in incomplete_proxy_cameras)
         print(f"Unvollstaendige Proxy-Konfiguration fuer: {names}")
         print("Bitte in camera_config.json je Kamera einen proxy-Block mit host/username/password ergaenzen.")
         return False
@@ -92,7 +67,7 @@ def write_env(cameras, output_path):
     print(f"{len(proxy_cameras)} ReolinkProxy-Kamera(s) gefunden:")
 
     for index, cam in enumerate(proxy_cameras):
-        name = camera_name(cam.get("name", f"Camera_{index}"))
+        name = _reolinkproxy_camera_name(cam.get("name", f"Camera_{index}"))
         proxy = cam.get("proxy") or make_proxy_from_rtsp(cam) or {}
 
         use_uid_only = bool(proxy.get("uid_only", False))
@@ -145,7 +120,7 @@ def update_camera_config(camera_config_path):
     for cam in config.get("cameras", []):
         if not is_reolinkproxy_camera(cam):
             continue
-        name = camera_name(cam.get("name", ""))
+        name = _reolinkproxy_camera_name(cam.get("name", ""))
         if "proxy" not in cam:
             proxy = make_proxy_from_rtsp(cam)
             if proxy:
