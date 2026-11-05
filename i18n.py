@@ -161,18 +161,29 @@ TRANSLATIONS = {
                                    "Siehe README für ReolinkProxy-Konfiguration.\n\n"
                                    "Kamera trotzdem hinzufügen?",
         "battery.indicator": "🔋 AKKU",
+        "btn.proxy_config": "ReolinkProxy-Konfig erzeugen",
+        "tooltip.proxy_config": "Schreibt reolinkproxy.env und docker-compose.yml neben camera_config.json",
+        "dialog.proxy_config.title": "ReolinkProxy-Konfiguration",
+        "dialog.proxy_config.done": "{count} Kamera(s) in {path} eingetragen:\n\n{cameras}\n\n"
+                                    "Proxy starten bzw. neu starten:\n\n"
+                                    "cd \"{dir}\"\ndocker compose up -d --force-recreate",
+        "dialog.proxy_config.none": "Keine ReolinkProxy-Kameras in der Konfiguration.",
+        "dialog.proxy_config.incomplete": "Unvollständige Proxy-Konfiguration für: {cameras}\n\n"
+                                          "Bitte die Kamera bearbeiten und Host, Benutzer und Passwort eintragen.",
+        "dialog.proxy_config.failed": "Konnte reolinkproxy.env nicht schreiben: {error}",
+        "status.proxy_config_written": "ReolinkProxy-Konfiguration geschrieben: {path}",
         "proxy.status.ready": "Proxy bereit",
         "proxy.status.unreachable": "Proxy: Kamera nicht erreichbar",
-        "proxy.status.missing": "Nicht im Proxy – reolinkproxy.env neu erzeugen",
+        "proxy.status.missing": "Nicht im Proxy – ReolinkProxy-Konfig neu erzeugen",
         "proxy.status.proxy_down": "ReolinkProxy läuft nicht",
         "proxy.status.error": "Proxy-Status unbekannt",
         "proxy.status.checking": "Prüfe Proxy...",
         "battery.warning.multi": "{count} Akku-Kameras hinzugefügt:\n\n{cameras}\n\n"
                                  "Diese Kameras schlafen meist und sollten über ReolinkProxy laufen.\n"
-                                 "Danach reolinkproxy.env neu erzeugen und den Proxy neu starten.",
+                                 "Danach „ReolinkProxy-Konfig erzeugen“ klicken und den Proxy neu starten.",
         "dialog.discovery.col.in_list": "In Liste",
         "dialog.discovery.proxy_hint": "{count} Reolink-Kamera(s) laufen über ReolinkProxy. "
-                                       "reolinkproxy.env neu erzeugen und den Proxy neu starten.",
+                                       "„ReolinkProxy-Konfig erzeugen“ klicken und den Proxy neu starten.",
         "scan.discovery": "Netzwerk-Suche (ONVIF/SSDP)...",
         "scan.ports": "Port-Scan {done}/{total}...",
         "camera.status.still_stopping": "Stream wird noch beendet. Bitte gleich erneut versuchen.",
@@ -348,18 +359,29 @@ TRANSLATIONS = {
                                    "See README for ReolinkProxy configuration.\n\n"
                                    "Add camera anyway?",
         "battery.indicator": "🔋 BATTERY",
+        "btn.proxy_config": "Generate ReolinkProxy config",
+        "tooltip.proxy_config": "Writes reolinkproxy.env and docker-compose.yml next to camera_config.json",
+        "dialog.proxy_config.title": "ReolinkProxy configuration",
+        "dialog.proxy_config.done": "{count} camera(s) written to {path}:\n\n{cameras}\n\n"
+                                    "Start or restart the proxy:\n\n"
+                                    "cd \"{dir}\"\ndocker compose up -d --force-recreate",
+        "dialog.proxy_config.none": "No ReolinkProxy cameras in the configuration.",
+        "dialog.proxy_config.incomplete": "Incomplete proxy configuration for: {cameras}\n\n"
+                                          "Please edit the camera and enter host, username and password.",
+        "dialog.proxy_config.failed": "Could not write reolinkproxy.env: {error}",
+        "status.proxy_config_written": "ReolinkProxy configuration written: {path}",
         "proxy.status.ready": "Proxy ready",
         "proxy.status.unreachable": "Proxy: camera unreachable",
-        "proxy.status.missing": "Not in proxy – regenerate reolinkproxy.env",
+        "proxy.status.missing": "Not in proxy – regenerate ReolinkProxy config",
         "proxy.status.proxy_down": "ReolinkProxy is not running",
         "proxy.status.error": "Proxy status unknown",
         "proxy.status.checking": "Checking proxy...",
         "battery.warning.multi": "{count} battery cameras added:\n\n{cameras}\n\n"
                                  "These cameras usually sleep and should run through ReolinkProxy.\n"
-                                 "Regenerate reolinkproxy.env and restart the proxy afterwards.",
+                                 "Click \"Generate ReolinkProxy config\" and restart the proxy afterwards.",
         "dialog.discovery.col.in_list": "In list",
         "dialog.discovery.proxy_hint": "{count} Reolink camera(s) use ReolinkProxy. "
-                                       "Regenerate reolinkproxy.env and restart the proxy.",
+                                       "Click \"Generate ReolinkProxy config\" and restart the proxy.",
         "scan.discovery": "Network discovery (ONVIF/SSDP)...",
         "scan.ports": "Port scan {done}/{total}...",
         "camera.status.still_stopping": "Stream is still stopping. Please try again shortly.",

@@ -1,12 +1,42 @@
 import json
 import os
+import shutil
+import sys
 
 from camera_utils import normalize_reolinkproxy_camera
-from detection import DEFAULT_DETECTION_CONFIG
+from detection import DEFAULT_DETECTION_CONFIG, _app_data_dir
 from notifications import DEFAULT_EMAIL_CONFIG
 
 
-CONFIG_PATH = "camera_config.json"
+CONFIG_FILENAME = "camera_config.json"
+
+
+def _resolve_config_path() -> str:
+    """Pfad zu camera_config.json.
+
+    Aus dem Quellcode und in den Linux-/Windows-Paketen liegt die Datei im
+    aktuellen Verzeichnis. Die macOS-App startet aus dem Finder mit "/" als
+    Arbeitsverzeichnis, deshalb liegen ihre Dateien fest pro Benutzer in
+    ~/Library/Application Support/WildCam. Eine vorhandene camera_config.json
+    im aktuellen Verzeichnis wird beim ersten Start dorthin kopiert.
+    """
+    if not (sys.platform == "darwin" and getattr(sys, "frozen", False)):
+        return CONFIG_FILENAME
+
+    data_dir = _app_data_dir()
+    target = data_dir / CONFIG_FILENAME
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        legacy = os.path.abspath(CONFIG_FILENAME)
+        if not target.exists() and os.path.isfile(legacy):
+            shutil.copy2(legacy, target)
+    except OSError as e:
+        print(f"App-Datenordner nicht nutzbar ({data_dir}): {e}")
+        return CONFIG_FILENAME
+    return str(target)
+
+
+CONFIG_PATH = _resolve_config_path()
 DEFAULT_RECORDING_PATH = os.path.expanduser("~/Videos/Reolink")
 
 

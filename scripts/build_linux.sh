@@ -78,7 +78,7 @@ if [[ ! -d "$BUNDLE_PATH" ]]; then
   exit 1
 fi
 
-for extra_file in README.md docker-compose.yml reolinkproxy_manager.py camera_config.json.example; do
+for extra_file in README.md docker-compose.yml camera_config.json.example; do
   if [[ -f "$extra_file" ]]; then
     cp "$extra_file" "$BUNDLE_PATH/"
   fi

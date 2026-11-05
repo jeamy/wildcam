@@ -45,12 +45,13 @@ from camera_utils import (
     normalize_reolinkproxy_camera,
     with_credentials,
 )
-from config import DEFAULT_RECORDING_PATH, config_payload, load_config_data, save_config_data, snapshot_path_for
+from config import CONFIG_PATH, DEFAULT_RECORDING_PATH, config_payload, load_config_data, save_config_data, snapshot_path_for
 from detection import DEFAULT_DETECTION_CONFIG, DetectionWorker, default_model_dir, prepare_model_path
 from dialogs import CameraDiscoveryDialog, CameraEditDialog
 from i18n import set_language, tr
 from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
 from proxy_status import check_proxy_streams
+from reolinkproxy_manager import ProxyConfigError, generate_proxy_files
 from ptz import PtzController, backend_for_camera, camera_has_ptz, detect_ptz, needs_ptz_detection
 from stream import CameraThread
 from ui_resources import load_svg_icon
@@ -216,6 +217,11 @@ class MainWindow(QMainWindow):
         path_btn.setIcon(load_svg_icon("folder.svg"))
         path_btn.setIconSize(QSize(18, 18))
         row2.addWidget(path_btn)
+
+        self.proxy_config_btn = QPushButton(tr("btn.proxy_config"))
+        self.proxy_config_btn.setToolTip(tr("tooltip.proxy_config"))
+        self.proxy_config_btn.clicked.connect(self.generate_proxy_config)
+        row2.addWidget(self.proxy_config_btn)
 
         self.language_label = QLabel(tr("label.language"))
         row2.addWidget(self.language_label)
@@ -1619,6 +1625,39 @@ class MainWindow(QMainWindow):
             self.save_config()
             self.statusBar().showMessage(tr("status.path", path=path))
 
+    def generate_proxy_config(self):
+        """reolinkproxy.env (und docker-compose.yml) neben camera_config.json schreiben."""
+        self.save_config()
+        target_dir = os.path.dirname(os.path.abspath(CONFIG_PATH))
+        cameras = config_payload(self).get("cameras", [])
+        try:
+            env_path, _compose_path, names = generate_proxy_files(cameras, target_dir)
+        except ProxyConfigError as e:
+            if e.reason == "incomplete":
+                message = tr("dialog.proxy_config.incomplete", cameras=", ".join(e.cameras))
+            else:
+                message = tr("dialog.proxy_config.none")
+            QMessageBox.warning(self, tr("dialog.proxy_config.title"), message)
+            return
+        except OSError as e:
+            QMessageBox.critical(self, tr("dialog.proxy_config.title"),
+                                 tr("dialog.proxy_config.failed", error=e))
+            return
+
+        QMessageBox.information(
+            self,
+            tr("dialog.proxy_config.title"),
+            tr(
+                "dialog.proxy_config.done",
+                count=len(names),
+                cameras="\n".join(f"• {name}" for name in names),
+                path=str(env_path),
+                dir=target_dir,
+            ),
+        )
+        self.statusBar().showMessage(tr("status.proxy_config_written", path=str(env_path)))
+        QTimer.singleShot(1000, self.refresh_proxy_status)
+
     def toggle_camera_detection(self, camera_id: int, enabled: bool):
         camera = self._camera_by_id(camera_id)
         if camera is None:
@@ -2032,6 +2071,9 @@ class MainWindow(QMainWindow):
             self.clear_btn.setText(tr("btn.clear_all"))
         if hasattr(self, "path_btn"):
             self.path_btn.setText(tr("btn.path"))
+        if hasattr(self, "proxy_config_btn"):
+            self.proxy_config_btn.setText(tr("btn.proxy_config"))
+            self.proxy_config_btn.setToolTip(tr("tooltip.proxy_config"))
         if hasattr(self, "language_label"):
             self.language_label.setText(tr("label.language"))
         if hasattr(self, "language_combo"):

@@ -78,10 +78,13 @@ WildCam supports two ways to connect Reolink cameras:
   - Works well for mains-powered cameras.
 - **ReolinkProxy (recommended for Reolink WLAN / battery cameras)**
   - Many Reolink WLAN/battery models use the **Baichuan protocol (port 9000)**.
-  - WildCam will automatically:
-    - add/update `reolinkproxy.env`
-    - switch the stored RTSP URL to `rtsp://localhost:8554/<NAME>/mainStream`
-    - so the app uses the ReolinkProxy-proxied stream
+  - WildCam automatically switches the stored RTSP URL to
+    `rtsp://localhost:8554/<NAME>/mainStream` and keeps the real camera
+    address/credentials in a `proxy` block, so the app uses the
+    ReolinkProxy-proxied stream.
+  - `reolinkproxy.env` is written from that via the
+    **Generate ReolinkProxy config** button (configuration tab) or by
+    `start_wildcam.sh`.
 
 #### What gets stored where
 
@@ -95,7 +98,7 @@ WildCam supports two ways to connect Reolink cameras:
     - `REOLINK_CAMERA_0_HOST="192.168.8.58"`
     - `REOLINK_CAMERA_0_RTSP_PATH="D58/mainStream"`
 
-#### Quick start (recommended)
+#### Quick start from source (recommended)
 
 ```bash
 ./start_wildcam.sh
@@ -106,6 +109,22 @@ This will:
 - Generate/extend `reolinkproxy.env` based on `camera_config.json`
 - Start ReolinkProxy via Docker
 - Start WildCam
+
+#### Quick start with a release build
+
+1. Start WildCam and add your cameras.
+2. Open the configuration tab and click **Generate ReolinkProxy config**.
+   WildCam writes `reolinkproxy.env` (file mode `600`, it contains the camera
+   passwords) next to `camera_config.json`, plus a `docker-compose.yml` if
+   there is none yet. The dialog shows the directory (macOS:
+   `~/Library/Application Support/WildCam`).
+3. Start or restart the proxy in that directory:
+
+   ```bash
+   docker compose up -d --force-recreate
+   ```
+
+No Python installation is needed for this.
 
 Important:
 
@@ -124,6 +143,16 @@ You usually **do not need to create this file manually**:
 - Reordering cameras via drag & drop updates the stored order.
 
 Manual editing is optional (e.g. to bulk-edit RTSP URLs or names).
+
+Where the file lives:
+
+- **Source checkout, Linux and Windows builds:** in the current working
+  directory (usually the folder you start WildCam from).
+- **macOS app (`wildcam.app`):** in `~/Library/Application Support/WildCam/`,
+  because apps started from the Finder have `/` as working directory. If a
+  `camera_config.json` exists in the working directory on first start, it is
+  copied there once. `reolinkproxy.env` and `docker-compose.yml` from
+  **Generate ReolinkProxy config** are written to the same folder.
 
 - The file is **gitignored** because it can contain **credentials** inside RTSP URLs.
 - `reolinkproxy.env` is generated from this file and should not be edited as the primary configuration.
@@ -300,11 +329,9 @@ For Reolink WLAN / Baichuan (port 9000) you can also enter:
 rtsp://admin:password@192.168.1.100:9000/h264Preview_01_main
 ```
 
-WildCam will automatically:
-
-- append/update the camera entry in `reolinkproxy.env`
-- store the camera in `camera_config.json` as:
-  - `rtsp://localhost:8554/<NAME>/mainStream`
+WildCam will automatically store the camera in `camera_config.json` as
+`rtsp://localhost:8554/<NAME>/mainStream` (plus a `proxy` block). Click
+**Generate ReolinkProxy config** afterwards to add it to `reolinkproxy.env`.
 
 ### Auto-discover
 
@@ -323,9 +350,9 @@ not pre-selected. The ReolinkProxy host itself is ignored.
 
 When you add found Reolink WLAN/battery cameras (port 9000 only, or a battery
 model), WildCam stores `localhost:8554/...` URLs plus a `proxy` block in
-`camera_config.json`. Regenerate `reolinkproxy.env` (`python3 reolinkproxy_manager.py`,
-done automatically by `start_wildcam.sh`) and restart the proxy afterwards;
-until then the camera shows *Not in proxy*.
+`camera_config.json`. Click **Generate ReolinkProxy config** (or run
+`start_wildcam.sh`) and restart the proxy afterwards; until then the camera
+shows *Not in proxy*.
 
 ### ReolinkProxy status
 
@@ -341,7 +368,7 @@ ReolinkProxy is a **proxy** and does not magically discover/wake sleeping camera
 
 Important:
 
-- WildCam writes and updates `reolinkproxy.env`, but the actual ReolinkProxy must run separately.
+- WildCam writes `reolinkproxy.env` (button **Generate ReolinkProxy config**), but the actual ReolinkProxy must run separately.
 - The recommended setup in this repository is the Docker Compose stack from `docker-compose.yml`.
 
 ### Pan/tilt (PTZ) control
@@ -369,8 +396,9 @@ WildCam includes automatic ReolinkProxy setup for battery cameras using port 900
 
 This is handled in two places:
 
-- The **GUI** automatically switches Reolink WLAN/Baichuan cameras to `rtsp://localhost:8554/...` and appends the camera to `reolinkproxy.env`.
-- The **startup script** can start the ReolinkProxy container for you.
+- The **GUI** automatically switches Reolink WLAN/Baichuan cameras to `rtsp://localhost:8554/...`
+  and writes `reolinkproxy.env` when you click **Generate ReolinkProxy config**.
+- The **startup script** (source checkout only) generates `reolinkproxy.env` and starts the ReolinkProxy container for you.
 
 #### Quick Start
 
@@ -387,7 +415,8 @@ This is handled in two places:
 
 #### Manual Setup
 
-If you prefer manual control:
+If you prefer manual control (source checkout; with a release build use the
+**Generate ReolinkProxy config** button instead of step 1):
 
 ```bash
 # 1. Generate reolinkproxy.env from your camera config
@@ -405,8 +434,9 @@ python3 main.py
 
 If you distribute WildCam as a standalone build:
 
-- the bundle can include `docker-compose.yml`, `reolinkproxy_manager.py`, `camera_config.json.example`, and the app itself
-- `reolinkproxy.env` is not bundled because it is generated locally and can contain credentials
+- the bundle includes the app, `docker-compose.yml`, `camera_config.json.example` and `README.md`
+- `reolinkproxy.env` is not bundled because it is generated locally and contains credentials;
+  the app generates it (button **Generate ReolinkProxy config**)
 - but it still does **not** include the external ReolinkProxy container/image
 - users who rely on Reolink battery / Baichuan cameras still need Docker/Compose or a separately installed `reolinkproxy`
 
@@ -462,8 +492,9 @@ The repository contains helper scripts using PyInstaller.
 
 Note about ReolinkProxy:
 
-- The packaged app bundles WildCam and helper files such as `docker-compose.yml` and `reolinkproxy_manager.py`.
-- The actual ReolinkProxy runtime is **not** bundled into the app archive.
+- The packaged app bundles WildCam, `docker-compose.yml`, `camera_config.json.example` and `README.md`.
+  The `reolinkproxy.env` generator is built into the app (button **Generate ReolinkProxy config**).
+- The actual ReolinkProxy runtime (Docker image `ghcr.io/shareed2k/reolinkproxy`) is **not** bundled into the app archive.
 - The optional object-detection runtime is **not** bundled into the app archive;
   it is installed on first use.
 - If you use only normal RTSP cameras, the standalone app is enough.
@@ -477,8 +508,20 @@ bash scripts/build_linux.sh
 
 Output:
 
-- Binary: `dist/wildcam`
+- Bundle: `dist/wildcam/`
 - Zip archive: `dist/wildcam_linux_<timestamp>.zip`
+- AppImage: `dist/wildcam_linux_<timestamp>.AppImage`
+
+### macOS
+
+```bash
+bash scripts/build_macos.sh
+```
+
+Output:
+
+- App bundle: `dist/wildcam.app`
+- Zip archive: `dist/wildcam_<platform>_<timestamp>.zip`
 
 ### Windows (PowerShell)
 
@@ -494,5 +537,13 @@ scripts\build_windows.cmd
 
 Output:
 
-- EXE: `dist\wildcam.exe`
+- Bundle: `dist\wildcam\` (contains `wildcam.exe`)
 - Zip archive: `dist\wildcam_windows_<timestamp>.zip`
+
+### Release via GitHub Actions
+
+`.github/workflows/build.yml` is started manually (*Actions → Build App → Run
+workflow*) with a tag (e.g. `v1.0.0`) and a source ref (default `master`). It
+creates or moves the tag, builds Linux (zip + AppImage), Windows, macOS Intel
+and macOS Apple Silicon with the scripts above, and attaches the archives to
+the GitHub release for that tag.

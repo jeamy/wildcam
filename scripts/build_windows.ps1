@@ -62,7 +62,6 @@ if (!(Test-Path $bundlePath)) {
 $extraFiles = @(
   "README.md",
   "docker-compose.yml",
-  "reolinkproxy_manager.py",
   "camera_config.json.example"
 )
 
