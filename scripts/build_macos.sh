@@ -53,6 +53,10 @@ fi
 
 rm -rf "$DIST_DIR" "$BUILD_DIR"
 
+# No --collect-all "PyQt6" here: on macOS it adds the Qt frameworks a second
+# time as data files, and COLLECT then fails creating the framework symlinks
+# (FileExistsError: Versions/Current/QtQuickControls2Macos). PyInstaller's own
+# PyQt6 hooks already collect the Qt frameworks and plugins the app needs.
 "$PY" -m PyInstaller \
   --noconfirm \
   --clean \
@@ -60,7 +64,7 @@ rm -rf "$DIST_DIR" "$BUILD_DIR"
   --windowed \
   --name "$APP_NAME" \
   --add-data "assets/icons:assets/icons" \
-  --collect-all "PyQt6" \
+  --hidden-import "PyQt6.QtSvg" \
   --collect-all "cv2" \
   --collect-all "numpy" \
   --exclude-module "ultralytics" \
