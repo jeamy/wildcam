@@ -26,3 +26,6 @@ dist/
 .windsurf
 
 .DS_Store
+
+# raw test recordings (netvue.py)
+*.h264

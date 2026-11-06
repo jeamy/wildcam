@@ -18,6 +18,7 @@ from camera_utils import (
     is_proxy_stream_url,
 )
 from i18n import tr
+from netvue import NetvueBridge, is_netvue_url
 
 
 class CameraThread(QThread):
@@ -28,8 +29,12 @@ class CameraThread(QThread):
     def __init__(self, camera_id, rtsp_url, uid="", is_reolink=True, prebuffer_seconds=0.0):
         super().__init__()
         self.camera_id = camera_id
+        # Netvue cameras speak their own LAN protocol; a local bridge turns it
+        # into a raw H.264 stream that OpenCV can read (see netvue.py).
+        self._is_netvue = is_netvue_url(rtsp_url)
+        self._netvue_bridge = None
         # Normalize URL to ensure explicit port (prevents FFmpeg TCP fallback errors)
-        self.rtsp_url = _normalize_rtsp_url(rtsp_url)
+        self.rtsp_url = rtsp_url if self._is_netvue else _normalize_rtsp_url(rtsp_url)
         self.uid = uid
         self.running = False
         self.recording = False
@@ -50,7 +55,7 @@ class CameraThread(QThread):
         self._is_proxy_stream = is_proxy_stream_url(rtsp_url)
         # Wake-up burst and Reolink path fallbacks only make sense for
         # native Reolink cameras (not for Tapo & co. or the proxy).
-        self._is_reolink = bool(is_reolink) and not self._is_proxy_stream
+        self._is_reolink = bool(is_reolink) and not self._is_proxy_stream and not self._is_netvue
         if self._is_proxy_stream:
             self.reconnect_delay = 2
         
@@ -74,6 +79,7 @@ class CameraThread(QThread):
                 self.connection_status.emit(False, self.camera_id, tr("error.prefix", error=str(e)))
             finally:
                 self._release_capture()
+                self._release_netvue_bridge()
 
             if self.running:
                 self.connection_status.emit(False, self.camera_id, tr("camera.preview.retrying"))
@@ -88,6 +94,11 @@ class CameraThread(QThread):
             except Exception:
                 pass
             self.cap = None
+
+    def _release_netvue_bridge(self):
+        if self._netvue_bridge is not None:
+            self._netvue_bridge.close()
+            self._netvue_bridge = None
 
     def _release_writer(self):
         with self._writer_lock:
@@ -111,6 +122,19 @@ class CameraThread(QThread):
             cv2.CAP_PROP_READ_TIMEOUT_MSEC, read_timeout_ms
         ])
     
+    def _open_netvue_capture(self):
+        """Start the local Netvue bridge and open it like a normal stream."""
+        self.connection_status.emit(False, self.camera_id, tr("camera.status.connecting"))
+        self._release_netvue_bridge()
+        self._netvue_bridge = NetvueBridge(self.rtsp_url)
+        # FFmpeg has to probe the raw H.264 stream, which takes a few seconds.
+        self.cap = self._open_capture(self._netvue_bridge.url, 20000, 10000)
+        if not self.cap.isOpened():
+            error = self._netvue_bridge.error
+            if error:
+                raise Exception(tr("camera.error.netvue", error=error))
+            raise Exception(tr("camera.error.stream_unreachable"))
+
     def _connect_and_stream(self):
         """Verbindung herstellen und streamen"""
         # Best-effort wake attempt for sleeping/battery cameras
@@ -157,9 +181,12 @@ class CameraThread(QThread):
         open_timeout_ms = 20000 if self._is_proxy_stream else 3000
         read_timeout_ms = 10000 if self._is_proxy_stream else 3000
 
-        # RTSP Stream öffnen (mit Fallback-Pfaden für native Reolink-RTSP-URLs)
-        # Use TCP transport to reduce RTP packet loss warnings
-        self.cap = self._open_capture(self.rtsp_url, open_timeout_ms, read_timeout_ms)
+        if self._is_netvue:
+            self._open_netvue_capture()
+        else:
+            # RTSP Stream öffnen (mit Fallback-Pfaden für native Reolink-RTSP-URLs)
+            # Use TCP transport to reduce RTP packet loss warnings
+            self.cap = self._open_capture(self.rtsp_url, open_timeout_ms, read_timeout_ms)
         
         # Falls eine native Kamera nicht öffnet, probieren wir Reolink-typische Varianten.
         # Bei ReolinkProxy-URLs ist der Pfad absichtlich fix (<Name>/mainStream).
@@ -213,6 +240,8 @@ class CameraThread(QThread):
             ret, frame = self.cap.read()
             
             if not ret:
+                if self._netvue_bridge is not None and self._netvue_bridge.error:
+                    raise Exception(tr("camera.error.netvue", error=self._netvue_bridge.error))
                 failed_reads += 1
                 if failed_reads >= max_failed_reads:
                     raise Exception(tr("camera.error.stream_interrupted"))
@@ -265,6 +294,7 @@ class CameraThread(QThread):
     def _cleanup(self):
         """Ressourcen freigeben"""
         self._release_capture()
+        self._release_netvue_bridge()
         self._release_writer()
         with self._writer_lock:
             self._release_event_writer_locked()

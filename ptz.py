@@ -21,6 +21,7 @@ from camera_utils import (
     is_proxy_stream_url,
     is_reolink_camera,
 )
+from netvue import is_netvue_url
 from onvif import ONVIF_PORTS, OnvifClient, find_onvif_service
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -46,7 +47,9 @@ def camera_has_ptz(camera: dict) -> bool:
 
 
 def needs_ptz_detection(camera: dict) -> bool:
-    return "ptz" not in camera and not is_proxy_stream_url(camera.get("url", ""))
+    url = camera.get("url", "")
+    # Netvue: no ONVIF/HTTP API; pan/tilt would need the Netvue protocol.
+    return "ptz" not in camera and not is_proxy_stream_url(url) and not is_netvue_url(url)
 
 
 # --------------------------------------------------------------------------
@@ -211,7 +214,7 @@ def detect_ptz(camera: dict) -> dict | None:
     """Detect pan/tilt support. Returns camera fields to store, or None if
     the camera could not be asked (offline, wrong credentials, ...)."""
     url = camera.get("url", "")
-    if is_proxy_stream_url(url):
+    if is_proxy_stream_url(url) or is_netvue_url(url):
         return None
     host, _port, username, password = _parse_rtsp_url(url)
     if not host:

@@ -23,6 +23,10 @@ from PyQt6.QtWidgets import (
 )
 
 from camera_utils import _build_rtsp_url, camera_hosts, find_matching_camera
+from netvue import DEFAULT_PORT as NETVUE_PORT, build_netvue_url, is_netvue_url, parse_netvue_url
+
+# Pseudo path in the URL builder that switches to a netvue:// URL.
+NETVUE_PATH = "netvue"
 from discovery import CameraDiscoveryThread
 from ptz import camera_has_ptz
 from i18n import tr
@@ -118,7 +122,8 @@ class CameraEditDialog(QDialog):
             "onvif1",
             "Streaming/Channels/101",
             "stream1",
-            "live"
+            "live",
+            NETVUE_PATH,
         ])
         self.path_combo.setEditable(True)
         builder_layout.addWidget(self.path_combo, 2, 1, 1, 3)
@@ -147,6 +152,17 @@ class CameraEditDialog(QDialog):
     def parse_current_url(self):
         """Aktuellen URL in Felder zerlegen (Zugangsdaten URL-dekodiert)."""
         url = self.camera_data.get('url', '')
+        if is_netvue_url(url):
+            try:
+                params = parse_netvue_url(url)
+            except Exception:
+                return
+            self.ip_input.setText(params['host'])
+            self.port_input.setText(str(params['port']))
+            self.username_input.setText(params['user'])
+            self.password_input.setText(params['key'])
+            self.path_combo.setCurrentText(NETVUE_PATH)
+            return
         if not url.lower().startswith(('rtsp://', 'rtsps://')):
             return
         sanitized = url.replace('#', '%23')
@@ -176,6 +192,13 @@ class CameraEditDialog(QDialog):
         
         if not ip:
             QMessageBox.warning(self, tr("dialog.title.error"), tr("dialog.edit.err_ip"))
+            return
+
+        if path == NETVUE_PATH:
+            # Netvue: user id + local key from the Netvue app (see README).
+            if port == "554":
+                port = str(NETVUE_PORT)
+            self.url_input.setText(build_netvue_url(ip, username, password, int(port)))
             return
         
         url = _build_rtsp_url(

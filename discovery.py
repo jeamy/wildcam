@@ -13,11 +13,13 @@ import urllib3
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from i18n import tr
+from netvue import DEFAULT_PORT as NETVUE_PORT, build_netvue_url, probe_netvue
 from onvif import ONVIF_PORTS, probe_onvif_device, ws_discovery
 
 # 9000 = Reolink Baichuan (battery/WLAN cameras often expose nothing else),
 # 2020 = Tapo ONVIF, 8899 = ONVIF on many OEM cameras.
-DEFAULT_SCAN_PORTS = (554, 8554, 80, 443, 8000, 9000, 2020, 8899)
+# 5555 = Netvue LAN protocol (no RTSP/ONVIF, see netvue.py).
+DEFAULT_SCAN_PORTS = (554, 8554, 80, 443, 8000, 9000, 2020, 8899, NETVUE_PORT)
 RTSP_PORTS = (554, 8554)
 REOLINK_BAICHUAN_PORT = 9000
 
@@ -215,6 +217,19 @@ def identify_host(ip: str, open_ports: list[int], onvif_info: dict | None,
     has_baichuan = REOLINK_BAICHUAN_PORT in open_ports
 
     if not (reolink or onvif or onvif_info or has_rtsp or has_baichuan):
+        # Netvue: only the proprietary LAN port; confirm by protocol so that
+        # other devices on 5555 (e.g. Android ADB) are not listed.
+        if NETVUE_PORT in open_ports and probe_netvue(ip):
+            return {
+                "ip": ip,
+                "ports": sorted(open_ports),
+                "name": tr("camera.default_name.ip", ip=ip),
+                "model": "Netvue",
+                "manufacturer": "Netvue",
+                "uid": "",
+                "mac": mac,
+                "stream_uri": build_netvue_url(ip, "", ""),
+            }
         return None
 
     reolink = reolink or {}

@@ -51,6 +51,7 @@ from dialogs import CameraDiscoveryDialog, CameraEditDialog
 from i18n import set_language, tr
 from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
 from proxy_status import check_proxy_streams
+from netvue import is_netvue_url
 from reolinkproxy_manager import ProxyConfigError, generate_proxy_files
 from ptz import PtzController, backend_for_camera, camera_has_ptz, detect_ptz, needs_ptz_detection
 from stream import CameraThread
@@ -896,7 +897,10 @@ class MainWindow(QMainWindow):
     def _build_discovered_camera_entry(self, camera_info: dict, username: str, password: str) -> dict:
         ports = camera_info.get('ports', [])
         is_reolink = (camera_info.get('manufacturer') or '').lower() == 'reolink'
-        if camera_info.get('stream_uri'):
+        if is_netvue_url(camera_info.get('stream_uri', '')):
+            # No credentials from the scan dialog: Netvue needs the app's local key.
+            url = camera_info['stream_uri']
+        elif camera_info.get('stream_uri'):
             # Exact RTSP URL reported by the camera via ONVIF GetStreamUri.
             url = with_credentials(camera_info['stream_uri'], username, password)
         else:
@@ -1195,12 +1199,21 @@ class MainWindow(QMainWindow):
         self.save_config()
 
         proxied = [c for c in added if c.get('proxy')]
+        netvue_cameras = [c for c in added if is_netvue_url(c.get('url', ''))]
         message = tr("status.auto_added", count=len(added))
         if proxied:
             message += " " + tr("dialog.discovery.proxy_hint", count=len(proxied))
         self.statusBar().showMessage(message)
         self.refresh_proxy_status()
         self.detect_missing_ptz([c['id'] for c in added])
+
+        if netvue_cameras:
+            QMessageBox.information(
+                self,
+                tr("netvue.key_needed.title"),
+                tr("netvue.key_needed.message",
+                   cameras="\n".join(f"• {c['name']}" for c in netvue_cameras)),
+            )
 
         battery_cameras = [c for c in added if self._is_battery_entry(c)]
         if battery_cameras:

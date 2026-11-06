@@ -172,6 +172,14 @@ TRANSLATIONS = {
                                           "Bitte die Kamera bearbeiten und Host, Benutzer und Passwort eintragen.",
         "dialog.proxy_config.failed": "Konnte reolinkproxy.env nicht schreiben: {error}",
         "status.proxy_config_written": "ReolinkProxy-Konfiguration geschrieben: {path}",
+        "camera.error.netvue": "Netvue: {error}",
+        "netvue.key_needed.title": "Netvue-Kamera: Schlüssel nötig",
+        "netvue.key_needed.message": "Netvue-Kameras haben kein RTSP. WildCam nutzt das lokale "
+                                     "Netvue-Protokoll und braucht dafür Benutzer-ID und lokalen "
+                                     "Schlüssel aus der Netvue-App:\n\n{cameras}\n\n"
+                                     "Kamera bearbeiten → Pfad „netvue“ wählen, Benutzer-ID und "
+                                     "Schlüssel eintragen → URL erstellen. Wie man beides ausliest, "
+                                     "steht in der README (Abschnitt „Netvue cameras“).",
         "proxy.status.ready": "Proxy bereit",
         "proxy.status.unreachable": "Proxy: Kamera nicht erreichbar",
         "proxy.status.missing": "Nicht im Proxy – ReolinkProxy-Konfig neu erzeugen",
@@ -370,6 +378,14 @@ TRANSLATIONS = {
                                           "Please edit the camera and enter host, username and password.",
         "dialog.proxy_config.failed": "Could not write reolinkproxy.env: {error}",
         "status.proxy_config_written": "ReolinkProxy configuration written: {path}",
+        "camera.error.netvue": "Netvue: {error}",
+        "netvue.key_needed.title": "Netvue camera: key required",
+        "netvue.key_needed.message": "Netvue cameras have no RTSP. WildCam uses the local Netvue "
+                                     "protocol, which needs the user id and local key from the "
+                                     "Netvue app:\n\n{cameras}\n\n"
+                                     "Edit the camera → choose path \"netvue\", enter user id and "
+                                     "key → build URL. How to read both is described in the README "
+                                     "(section \"Netvue cameras\").",
         "proxy.status.ready": "Proxy ready",
         "proxy.status.unreachable": "Proxy: camera unreachable",
         "proxy.status.missing": "Not in proxy – regenerate ReolinkProxy config",

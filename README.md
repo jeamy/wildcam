@@ -1,6 +1,7 @@
 # wildcam
 
 `wildcam` is a PyQt6-based multi-camera viewer optimized for parallel RTSP streams (e.g. Reolink).
+It also shows Netvue cameras (e.g. Orb Mini), which have no RTSP, over their local LAN protocol.
 
 ## Features
 
@@ -10,7 +11,11 @@
   - Start/stop recording
   - Snapshot
   - Edit/remove camera
-- **Auto-discovery** (network scan)
+- **Auto-discovery** (network scan: ONVIF, RTSP, Reolink, Netvue)
+- **Camera types**
+  - RTSP cameras (Reolink, Tapo, other ONVIF/RTSP cameras)
+  - Reolink WLAN/battery cameras via ReolinkProxy
+  - Netvue cameras via their local LAN protocol (`netvue://` URL, see [Netvue cameras](#netvue-cameras))
 - **Recording & snapshots**
   - Default recordings folder: `~/Videos/Reolink`
   - Snapshots are stored in `~/Videos/Reolink/snapshots`
@@ -154,7 +159,8 @@ Where the file lives:
   copied there once. `reolinkproxy.env` and `docker-compose.yml` from
   **Generate ReolinkProxy config** are written to the same folder.
 
-- The file is **gitignored** because it can contain **credentials** inside RTSP URLs.
+- The file is **gitignored** because it can contain **credentials** inside RTSP URLs
+  and the local keys of Netvue cameras. They are only stored there, never in the repository.
 - `reolinkproxy.env` is generated from this file and should not be edited as the primary configuration.
 - Use `camera_config.json.example` as a safe template and create your local config from it.
 
@@ -171,7 +177,8 @@ Then edit `camera_config.json` and replace IPs / usernames / passwords.
 - **`cameras`**
   - List of camera objects, in the exact order they appear on the left.
   - **`id`** must be unique.
-  - **`url`** is the RTSP URL.
+  - **`url`** is the RTSP URL, or `netvue://<user id>:<local key>@<ip>:5555` for a
+    [Netvue camera](#netvue-cameras). Both can contain credentials.
   - **`name`** is the display name.
   - **`detection_enabled`** enables object detection for that camera.
   - **`proxy`** is optional and contains ReolinkProxy connection settings for battery/WLAN cameras.
@@ -346,6 +353,12 @@ WildCam will automatically store the camera in `camera_config.json` as
 `rtsp://localhost:8554/<NAME>/mainStream` (plus a `proxy` block). Click
 **Generate ReolinkProxy config** afterwards to add it to `reolinkproxy.env`.
 
+For a Netvue camera enter its `netvue://` URL (see [Netvue cameras](#netvue-cameras)):
+
+```text
+netvue://<user id>:<local key>@192.168.1.120:5555
+```
+
 ### Auto-discover
 
 Open **Auto-Discover**, choose your network (e.g. `192.168.1.0/24`), enter credentials, and start the scan.
@@ -353,8 +366,9 @@ Open **Auto-Discover**, choose your network (e.g. `192.168.1.0/24`), enter crede
 The scan combines:
 
 - **ONVIF WS-Discovery** (name/model; with credentials also the exact RTSP URL via `GetStreamUri`)
-- a parallel **port scan** (554, 8554, 80, 443, 8000, 9000, 2020, 8899)
+- a parallel **port scan** (554, 8554, 80, 443, 8000, 9000, 2020, 8899, 5555)
 - the **Reolink HTTP API** (vendor; with credentials model, name and P2P UID)
+- a **Netvue** protocol check on port 5555 (see [Netvue cameras](#netvue-cameras))
 
 Hosts of cameras already in your list are scanned a second time with a longer
 timeout (WLAN cameras often miss the fast scan). Results are matched against
@@ -400,6 +414,71 @@ Detection (runs once in the background, stored as `"ptz"` per camera):
 
 The automatic result can be overridden per camera in the edit dialog
 (*Pan/tilt camera*).
+
+## Netvue cameras
+
+Netvue cameras (e.g. **Orb Mini**) have no RTSP, ONVIF or web interface; the
+only open port is TCP **5555**. The Netvue app streams live video over this
+port directly in the LAN with a small proprietary protocol, which WildCam
+speaks as well (`netvue.py`): login with the app's **local key**, then H.264
+video (1920×1080 on the Orb Mini). Nothing on the camera is changed.
+
+Camera URL:
+
+```text
+netvue://<user id>:<local key>@<camera ip>:5555
+```
+
+Optional `?quality=0..3` (0 auto, 1 HD = default, 2 balanced, 3 SD).
+
+### Reading user id and local key
+
+Both are stored by the Netvue app and written to the Android log when the
+live view opens. With wireless debugging (Developer options → *Wireless
+debugging*) or USB debugging enabled:
+
+1. Open the camera's live view in the Netvue app.
+2. On the PC (source checkout):
+
+   ```bash
+   adb logcat -d | python3 netvue.py from-log
+   ```
+
+   This prints the complete `netvue://` URL for every camera the app has
+   opened. Without the source checkout, search the log manually:
+   `adb logcat -d | grep doLogin` shows `user:<USER> ... localKey:<KEY>`.
+
+The local key is a password for the camera's video: keep it private. It is
+stored only in your local `camera_config.json` (gitignored) like RTSP
+passwords; there is no separate key file. Raw test recordings (`*.h264`)
+are gitignored as well.
+
+### Adding the camera
+
+- **Auto-Discover** lists Netvue cameras (manufacturer *Netvue*) after a
+  protocol check on port 5555, so other devices on that port (e.g. Android
+  ADB) are not listed. After adding, WildCam asks for the key.
+- **Edit dialog:** choose path `netvue`, enter IP, user id (*Username*) and
+  local key (*Password*), click **Build URL**. Port 5555 is filled in.
+- Or paste the URL from `from-log` as RTSP URL when adding a camera.
+
+How it works: `netvue.py` connects to the camera, logs in and requests the
+live channel; a small bridge on `127.0.0.1` passes the H.264 video to the
+normal stream thread, which reads it with OpenCV/FFmpeg like an RTSP stream.
+The protocol (packet header, commands, error codes) is documented at the top
+of `netvue.py`.
+
+Notes:
+
+- Preview, recording, snapshots and object detection work as for RTSP
+  cameras. Audio is not used. Opening the stream takes about 5 s.
+- Pan/tilt (the Orb Mini can pan) is not supported yet; it would need the
+  Netvue control commands.
+- If the camera rejects the key (*local key invalid*), open the live view in
+  the Netvue app again and read the key anew. A Netvue firmware or app
+  update may change the protocol.
+- Test without WildCam: `python3 netvue.py <ip> --user <USER> --key <KEY>`
+  saves 8 s of raw H.264 to `netvue_test.h264`.
 
 ## Battery Cameras
 
