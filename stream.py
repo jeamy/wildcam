@@ -60,6 +60,11 @@ class CameraThread(QThread):
             self.reconnect_delay = 2
         
         # Alternative Pfade (Reolink Fallbacks)
+        # Gemessene Bildrate (Frames pro Sekunde, vom Stream gelesen)
+        self.measured_fps = 0.0
+        self._fps_frames = 0
+        self._fps_window_start = time.monotonic()
+
         self._alt_paths = [
             "h264Preview_01_main",
             "h265Preview_01_main",
@@ -252,6 +257,12 @@ class CameraThread(QThread):
             self._remember_frame(frame)
             
             now = time.monotonic()
+            self._fps_frames += 1
+            fps_elapsed = now - self._fps_window_start
+            if fps_elapsed >= 1.0:
+                self.measured_fps = self._fps_frames / fps_elapsed
+                self._fps_frames = 0
+                self._fps_window_start = now
             if now - last_ui_emit >= ui_emit_interval:
                 self.frame_ready.emit(frame.copy(), self.camera_id)
                 last_ui_emit = now

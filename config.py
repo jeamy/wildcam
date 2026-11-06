@@ -59,6 +59,7 @@ def config_payload(window) -> dict:
         "preview_camera_ids": list(window.selected_camera_ids),
         "selected_camera_id": window.selected_camera_id,
         "ptz_pad_visible": bool(getattr(window, "ptz_pad_visible", True)),
+        "window_geometry": window.window_geometry_payload(),
     }
 
 

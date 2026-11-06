@@ -26,6 +26,11 @@ It also shows Netvue cameras (e.g. Orb Mini), which have no RTSP, over their loc
   - Saves annotated detection snapshots and short event clips
   - Can send optional SMTP email alerts with the detection image attached
   - Includes a settings-page test mail button for SMTP checks
+- **Live statistics in the toolbar**: app memory (RAM), network activity
+  (download/upload of the whole system), data received since start and the
+  frame rate of the active camera (Σ = all running streams)
+- **Restores the last session**: open preview cameras, window position/size
+  and maximized state are stored in `camera_config.json`
 - **UI language switch** (German/English), stored in `camera_config.json`
 
 ## License
@@ -162,6 +167,9 @@ Where the file lives:
 - The file is **gitignored** because it can contain **credentials** inside RTSP URLs
   and the local keys of Netvue cameras. They are only stored there, never in the repository.
 - `reolinkproxy.env` is generated from this file and should not be edited as the primary configuration.
+- UI state is stored there too: `preview_camera_ids` (open previews),
+  `window_geometry` (position, size, maximized) and `ptz_pad_visible`. A stored
+  window position is only applied if it is still visible on a connected screen.
 - Use `camera_config.json.example` as a safe template and create your local config from it.
 
 ### Create your local config

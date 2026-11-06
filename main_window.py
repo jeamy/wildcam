@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from PyQt6.QtCore import QEvent, QRect, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QGuiApplication, QPixmap
 from datetime import datetime
 import time
 
@@ -55,6 +55,7 @@ from netvue import is_netvue_url
 from reolinkproxy_manager import ProxyConfigError, generate_proxy_files
 from ptz import PtzController, backend_for_camera, camera_has_ptz, detect_ptz, needs_ptz_detection
 from stream import CameraThread
+from sysstats import NetworkMonitor, format_bytes, process_memory_bytes
 from ui_resources import load_svg_icon
 from widgets import CameraListContainer, CameraWidget, PreviewLabel, PtzPad, letterbox_rgb, rgb_to_pixmap
 
@@ -273,11 +274,19 @@ class MainWindow(QMainWindow):
 
         self.camera_count_label = QLabel(tr("label.camera_count", total=0, active=0))
         self.camera_count_label.setStyleSheet("font-weight: bold;")
+
+        # Statistiken: Speicher, Netzwerk, übertragene Daten, FPS der aktiven Kamera
+        self._network_monitor = NetworkMonitor()
+        self.stats_label = QLabel()
+        self.stats_label.setStyleSheet("color: #9e9e9e;")
+        self.stats_label.setToolTip(tr("tooltip.stats"))
         
         control_layout.addWidget(self.start_all_btn)
         control_layout.addWidget(self.stop_all_btn)
         control_layout.addWidget(self.record_all_btn)
         control_layout.addStretch()
+        control_layout.addWidget(self.stats_label)
+        control_layout.addSpacing(12)
         control_layout.addWidget(self.camera_count_label)
 
         cameras_layout.addWidget(control_widget)
@@ -339,7 +348,7 @@ class MainWindow(QMainWindow):
         # Timer für Status-Updates
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self.update_status_display)
-        self.status_timer.start(2000)  # Alle 2 Sekunden
+        self.status_timer.start(1000)  # Jede Sekunde (FPS/Netzwerk)
 
     def _create_detection_config_group(self):
         group = QGroupBox(tr("group.detection_config"))
@@ -1625,6 +1634,33 @@ class MainWindow(QMainWindow):
         total = len(self.cameras)
         active = len([t for t in self.camera_threads.values() if t.isRunning()])
         self.camera_count_label.setText(tr("label.camera_count", total=total, active=active))
+        self._update_stats_label()
+
+    def _update_stats_label(self):
+        label = getattr(self, "stats_label", None)
+        if label is None:
+            return
+        recv_rate, sent_rate = self._network_monitor.update()
+        received = self._network_monitor.total_received
+
+        fps_text = "–"
+        camera_id = self._get_active_big_preview_camera_id()
+        thread = self.camera_threads.get(camera_id) if camera_id is not None else None
+        if thread is not None and thread.isRunning():
+            fps_text = f"{thread.measured_fps:.1f}"
+        else:
+            running = [t for t in self.camera_threads.values() if t.isRunning()]
+            if running:
+                fps_text = "Σ " + f"{sum(t.measured_fps for t in running):.0f}"
+
+        label.setText(tr(
+            "label.stats",
+            mem=format_bytes(process_memory_bytes()),
+            down=format_bytes(recv_rate, per_second=True),
+            up=format_bytes(sent_rate, per_second=True),
+            total=format_bytes(received),
+            fps=fps_text,
+        ))
     
     def select_recording_path(self):
         """Speicherort für Aufnahmen wählen"""
@@ -1823,6 +1859,40 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(tr("status.snapshot_error", error=e))
     
+    def window_geometry_payload(self):
+        """Fensterposition/-größe für die Konfiguration (normale Geometrie, nicht maximiert)."""
+        geometry = self.normalGeometry() if (self.isMaximized() or self.isFullScreen()) else self.geometry()
+        return {
+            "x": geometry.x(),
+            "y": geometry.y(),
+            "width": geometry.width(),
+            "height": geometry.height(),
+            "maximized": bool(self.isMaximized() or self.isFullScreen()),
+        }
+
+    def _restore_window_geometry(self, payload):
+        """Gespeicherte Fensterposition/-größe wiederherstellen (nur wenn auf einem Bildschirm sichtbar)."""
+        if not isinstance(payload, dict):
+            return
+        try:
+            rect = QRect(int(payload["x"]), int(payload["y"]), int(payload["width"]), int(payload["height"]))
+        except Exception:
+            return
+        if rect.width() < 400 or rect.height() < 300:
+            return
+        visible = False
+        for screen in QGuiApplication.screens():
+            overlap = screen.availableGeometry().intersected(rect)
+            if overlap.width() >= 200 and overlap.height() >= 100:
+                visible = True
+                break
+        if visible:
+            self.setGeometry(rect)
+        else:
+            self.resize(rect.width(), rect.height())
+        if payload.get("maximized"):
+            self.setWindowState(self.windowState() | Qt.WindowState.WindowMaximized)
+
     def save_config(self):
         """Konfiguration speichern"""
         try:
@@ -1853,6 +1923,7 @@ class MainWindow(QMainWindow):
             self._order_custom = bool(config.get('order_custom', False))
             self.next_camera_id = config.get('next_camera_id', 1)
             self.ptz_pad_visible = bool(config.get('ptz_pad_visible', True))
+            self._restore_window_geometry(config.get('window_geometry'))
 
             self.grid_cols_spin.setValue(self.cameras_per_row)
             if hasattr(self, "language_combo"):
@@ -1887,6 +1958,7 @@ class MainWindow(QMainWindow):
             self.detection_worker.stop(timeout_ms=3000)
             self.detection_worker = None
         if not running_threads:
+            self.save_config()
             event.accept()
             return
 
@@ -2027,6 +2099,9 @@ class MainWindow(QMainWindow):
             self.tabs.setTabText(1, tr("tab.config"))
         if hasattr(self, "config_group"):
             self.config_group.setTitle(tr("group.camera_config"))
+        if hasattr(self, "stats_label"):
+            self.stats_label.setToolTip(tr("tooltip.stats"))
+            self._update_stats_label()
         if hasattr(self, "detection_group"):
             self.detection_group.setTitle(tr("group.detection_config"))
         if hasattr(self, "email_group"):

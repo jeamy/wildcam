@@ -10,5 +10,8 @@ numpy>=1.24.0
 # HTTP Requests für Kamera-API
 requests>=2.31.0
 
+# Systemstatistiken (RAM, Netzwerk) in der Leiste
+psutil>=5.9.0
+
 # Optional: Bessere Performance mit opencv-contrib
 # opencv-contrib-python>=4.8.0
