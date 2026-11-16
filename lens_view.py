@@ -49,8 +49,6 @@ class LensView(QWidget):
         self.label.setText(tr('camera.preview.waiting'))
 
     def retranslate_ui(self):
-        title = f"{self.camera_name} — {tr('lens.' + self.half)}"
-        self.label.setToolTip(f"{title}\n{tr('lens.zoom_hint')}")
         if self.ptz_pad is not None:
             self.ptz_pad.retranslate_ui()
 

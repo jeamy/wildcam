@@ -745,7 +745,6 @@ class MainWindow(QMainWindow):
         label.double_clicked.connect(self._on_big_preview_label_double_clicked)
         label.region_selected.connect(self._on_big_preview_region_selected)
         label.installEventFilter(self)
-        label.setToolTip(tr('lens.zoom_hint'))
 
     def _detection_worker_is_running(self) -> bool:
         return bool(self.detection_worker is not None and self.detection_worker.isRunning())

@@ -214,9 +214,6 @@ TRANSLATIONS = {
         "ptz.stop": "Bewegung stoppen",
         "ptz.error": "PTZ-Fehler ({name}): {error}",
         "dialog.edit.ptz": "Schwenkbar (Steuerkreuz anzeigen)",
-        "lens.upper": "Oben – fest",
-        "lens.lower": "Unten – beweglich",
-        "lens.zoom_hint": "Mausrad oder Rechteck ziehen: Zoom. Doppelklick: Zoom zurücksetzen oder Kachel vergrößern/verkleinern.",
     },
     "en": {
         "app.title": "Reolink Multi-Camera Viewer",
@@ -430,9 +427,6 @@ TRANSLATIONS = {
         "ptz.stop": "Stop movement",
         "ptz.error": "PTZ error ({name}): {error}",
         "dialog.edit.ptz": "Pan/tilt camera (show control cross)",
-        "lens.upper": "Upper – fixed",
-        "lens.lower": "Lower – movable",
-        "lens.zoom_hint": "Mouse wheel or drag a rectangle to zoom. Double-click to reset zoom or expand/restore the tile.",
     },
 }
 
