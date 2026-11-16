@@ -49,6 +49,7 @@ from config import CONFIG_PATH, DEFAULT_RECORDING_PATH, config_payload, load_con
 from detection import DEFAULT_DETECTION_CONFIG, DetectionWorker, default_model_dir, prepare_model_path
 from dialogs import CameraDiscoveryDialog, CameraEditDialog
 from i18n import set_language, tr
+from lens_view import LensViewWindow, has_split_lenses
 from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
 from proxy_status import check_proxy_streams
 from netvue import is_netvue_url
@@ -88,6 +89,7 @@ class MainWindow(QMainWindow):
         self.cameras = []
         self.camera_threads = {}  # Dict für parallele Thread-Verwaltung
         self.camera_widgets = {}  # Dict für Widget-Zugriff
+        self.lens_windows = {}
         self.recording_path = DEFAULT_RECORDING_PATH
         self.snapshot_path = snapshot_path_for(self.recording_path)
         self.event_path = os.path.join(self.recording_path, "events")
@@ -973,6 +975,7 @@ class MainWindow(QMainWindow):
 
     def _stop_camera_thread(self, camera_id, timeout_ms: int = 3000) -> bool:
         """Stop and forget a camera thread. False if it is still shutting down."""
+        self._close_lens_windows(camera_id)
         thread = self.camera_threads.get(camera_id)
         if thread is None:
             return True
@@ -1099,7 +1102,7 @@ class MainWindow(QMainWindow):
     def _active_ptz_camera_id(self):
         camera_id = self._get_active_big_preview_camera_id()
         camera = self._camera_by_id(camera_id) if camera_id is not None else None
-        if camera is None or not camera_has_ptz(camera):
+        if camera is None or not camera_has_ptz(camera) or has_split_lenses(camera):
             return None
         return camera['id']
 
@@ -1152,6 +1155,54 @@ class MainWindow(QMainWindow):
         pad.move(max(0, container.width() - pad.width() - margin), max(0, container.height() - pad.height() - margin))
         pad.raise_()
 
+    def _show_lens_windows(self, camera_id, *, use_last_frame=True):
+        camera = self._camera_by_id(camera_id)
+        if self._closing or not has_split_lenses(camera):
+            return
+        for index, half in enumerate(('upper', 'lower')):
+            key = (camera_id, half)
+            window = self.lens_windows.get(key)
+            if window is None:
+                window = LensViewWindow(camera_id, camera.get('name', str(camera_id)), half,
+                                        ptz=camera_has_ptz(camera), parent=self)
+                window.closed.connect(lambda key=key: self.lens_windows.pop(key, None))
+                if window.ptz_pad is not None:
+                    window.move_requested.connect(lambda direction, cid=camera_id: self._move_lens_ptz(cid, direction))
+                    window.stop_requested.connect(lambda cid=camera_id: self._stop_lens_ptz(cid))
+                self.lens_windows[key] = window
+                area = self.screen().availableGeometry()
+                width = min(720, max(320, area.width() // 2 - 20))
+                height = min(470, area.height())
+                window.resize(width, height)
+                window.move(area.x() + index * (width + 10), area.y() + 40)
+                widget = self.camera_widgets.get(camera_id)
+                if (use_last_frame and self._stream_running(camera_id)
+                        and widget is not None and widget.last_frame is not None):
+                    window.update_frame(widget.last_frame)
+            window.show()
+            window.raise_()
+
+    def _close_lens_windows(self, camera_id=None):
+        for (cid, _half), window in list(self.lens_windows.items()):
+            if camera_id is None or cid == camera_id:
+                window.close()
+
+    def _move_lens_ptz(self, camera_id, direction):
+        window = self.lens_windows.get((camera_id, 'lower'))
+        camera = self._camera_by_id(camera_id)
+        if (window is None or not window.isVisible() or window.frame is None
+                or not has_split_lenses(camera) or not camera_has_ptz(camera)
+                or not self._stream_running(camera_id)):
+            return
+        controller = self._ptz_controller(camera_id)
+        if controller is not None:
+            controller.move(direction)
+
+    def _stop_lens_ptz(self, camera_id):
+        controller = self._ptz_controllers.get(camera_id)
+        if controller is not None:
+            controller.stop()
+
     def _start_camera_thread(self, camera: dict) -> CameraThread:
         camera_id = camera['id']
         thread = CameraThread(
@@ -1167,6 +1218,7 @@ class MainWindow(QMainWindow):
         self.camera_threads[camera_id] = thread
         if camera_id in self.camera_widgets:
             self.camera_widgets[camera_id].set_stream_active(True)
+        self._show_lens_windows(camera_id, use_last_frame=False)
         return thread
 
     def _clear_big_preview_label(self, text: str = ""):
@@ -1292,6 +1344,7 @@ class MainWindow(QMainWindow):
         camera_data = self._camera_by_id(camera_id)
         if not camera_data:
             return
+        self._close_lens_windows(camera_id)
         
         # Stream stoppen falls aktiv
         was_running = self._stream_running(camera_id)
@@ -1349,6 +1402,7 @@ class MainWindow(QMainWindow):
         
         # Skip wenn bereits läuft
         if camera_id in self.camera_threads and self.camera_threads[camera_id].isRunning():
+            self._show_lens_windows(camera_id)
             return
 
         if camera_id in self.camera_widgets and self.camera_widgets[camera_id].record_btn.isChecked():
@@ -1523,6 +1577,7 @@ class MainWindow(QMainWindow):
     
     def stop_all_streams(self):
         """Alle Streams stoppen"""
+        self._close_lens_windows()
         threads = list(self.camera_threads.values())
         force_stop = bool(getattr(self, "_closing", False))
 
@@ -1566,6 +1621,10 @@ class MainWindow(QMainWindow):
     
     def update_camera_frame(self, frame, camera_id):
         """Frame einer Kamera aktualisieren"""
+        for half in ('upper', 'lower'):
+            window = self.lens_windows.get((camera_id, half))
+            if window is not None:
+                window.update_frame(frame)
         widget = self.camera_widgets.get(camera_id)
         if widget is not None:
             try:
@@ -1587,9 +1646,15 @@ class MainWindow(QMainWindow):
     
     def update_camera_status(self, connected, camera_id, message):
         """Status einer Kamera aktualisieren"""
+        for half in ('upper', 'lower'):
+            window = self.lens_windows.get((camera_id, half))
+            if window is not None:
+                window.set_status(connected, message)
         widget = self.camera_widgets.get(camera_id)
         if widget is not None:
             try:
+                if not connected and has_split_lenses(self._camera_by_id(camera_id)):
+                    widget.last_frame = None
                 widget.update_status(connected, message)
             except RuntimeError:
                 return
@@ -1958,6 +2023,7 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Beim Schließen alle Threads sauber beenden"""
+        self._close_lens_windows()
         running_threads = [t for t in self.camera_threads.values() if t.isRunning()]
         if self.detection_worker is not None:
             self.detection_worker.stop(timeout_ms=3000)
@@ -2014,6 +2080,8 @@ class MainWindow(QMainWindow):
     def select_camera(self, camera_id):
         # If multi-view is active (checkboxes), don't use old single-camera selection
         if len(self.selected_camera_ids) > 0:
+            if has_split_lenses(self._camera_by_id(camera_id)):
+                self.start_single_stream(camera_id)
             return
         
         self.selected_camera_id = camera_id
@@ -2042,6 +2110,7 @@ class MainWindow(QMainWindow):
             self.start_single_stream(camera_id)
         else:
             self._refresh_big_preview_from_last_frame(camera_id)
+            self._show_lens_windows(camera_id)
         self._update_ptz_pad()
         self.save_config()
 
@@ -2097,6 +2166,8 @@ class MainWindow(QMainWindow):
 
     def retranslate_ui(self):
         self.setWindowTitle(tr("app.title"))
+        for window in self.lens_windows.values():
+            window.retranslate_ui()
         if hasattr(self, "ptz_pad"):
             self.ptz_pad.retranslate_ui()
         if hasattr(self, "tabs"):

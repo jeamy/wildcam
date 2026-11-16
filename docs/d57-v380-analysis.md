@@ -12,6 +12,12 @@ H.265/HEVC in **2304 × 2592 Pixeln**. Die obere Ansicht ist fest, die untere
 beweglich. Lokales PTZ für die untere Kamera ist implementiert und mit echten
 Fahr-/Stopp-Befehlen geprüft. Audio ist nicht implementiert.
 
+Die lokale Bildaufteilung ist inzwischen implementiert: Für das Modell D57
+öffnen sich zwei unabhängig zoombare Fenster, PTZ nur im unteren Fenster.
+Beide nutzen den vorhandenen gemeinsamen Stream und Decoder. Die neue Darstellung
+wurde mit aufgezeichnetem Original-HEVC geprüft; Details und die Grenze der
+erneuten Liveprüfung stehen im letzten Abschnitt.
+
 Die erste Protokollprüfung decodierte mit FFmpeg **96 Frames in acht Sekunden**
 ohne gemeldete Decoderfehler. Der erste Test der implementierten Bridge im echten
 CameraThread lieferte **40 Frames**, Bildform `(2592, 2304, 3)`, Bridgefehler `None`.
@@ -127,8 +133,8 @@ Temporäre Analysequellen, Medien und Sitzung liegen außerhalb des Repositorys 
 - Kein Nachweis für weitere Geräte-/Kommunikationsversionen.
 - Gleichzeitige App-Nutzung, längerer Dauerbetrieb und Verhalten bei DHCP-Wechsel
   sind nicht empirisch geprüft.
-- Die native hohe Bildauflösung wird vollständig erhalten; Aufteilung in separate
-  Ansichten ist nicht implementiert.
+- Aufzeichnung, Snapshots und Erkennung behalten das vollständige native Bild.
+  Die beiden lokalen Ansichtsfenster sind keine nativen Einzelobjektivstreams.
 - Physische PTZ-Bewegung wurde geprüft; Betrieb bei gesperrtem Internet bleibt ungeprüft.
 - Kein Firmwareflash oder SD-Karten-Konfigurationstrick erforderlich.
 
@@ -340,3 +346,86 @@ Alle **29 Offline-Tests** bestanden: zusätzlich unter anderem Richtungs-/Stoppa
 Watchdog ohne Release, alte Timer, Schließen bei Bewegung, Sitzungswechsel,
 Controller-Schließen, D57-Konfigurationsmigration und manuelles Deaktivieren.
 Audio und eine native Einzelstream-Auswahl sind weiterhin nicht implementiert.
+
+## Erneute native Streamprüfung am 16.11.2026
+
+Auf erneuten Nutzerauftrag wurden acht frische lokale Live-Sitzungen geprüft.
+Zusätzlich zur bisherigen Anmeldung wurden die drei im App-SDK gesetzten Bytes
+an Offset 30, 31 und 32 der 301-Anfrage jeweils auf 1 gesetzt
+(`HSLiveDataV2Transmitter::getDataFromDevice`, ARM64 0x46080,
+0x46110–0x4611c). Das ist keine nachgewiesene Objektivauswahl, sondern prüft,
+ob die bisher ausgelassenen SDK-Felder die Kanalwahl beeinflussen.
+Play-Channel ist weiterhin u32 an Offset 8, Qualität u32 an Offset 26.
+
+| Versuch | Ergebnis |
+| --- | --- |
+| Standardanmeldung, Kanal 0, HD | 24 decodierte HEVC-Bilder, 2304 × 2592, beide Objektive |
+| Standardanmeldung, Kanal 0, SD | 24 decodierte HEVC-Bilder, 640 × 720, beide Objektive |
+| Zusätzliche SDK-Felder, Kanal 0, HD | 24 decodierte HEVC-Bilder, 2304 × 2592, beide Objektive |
+| Zusätzliche SDK-Felder, Kanal 0, SD | 24 decodierte HEVC-Bilder, 640 × 720, beide Objektive |
+| Zusätzliche SDK-Felder, Kanal 1, HD | Kamera schließt Streamverbindung ohne Antwortbytes |
+| Zusätzliche SDK-Felder, Kanal 2, HD | Kamera schließt Streamverbindung ohne Antwortbytes |
+| Zusätzliche SDK-Felder, Kanal 1, SD | Kamera schließt Streamverbindung ohne Antwortbytes |
+| Abschließender Kontrollstart, Standardanmeldung, Kanal 0, HD | Wieder 24 decodierte HEVC-Bilder, 2304 × 2592, beide Objektive |
+
+Alle fünf erfolgreichen Aufzeichnungen wurden ab einem Schlüsselbild gespeichert,
+mit `ffprobe -count_frames` vollständig decodiert (insgesamt 120 Bilder, keine
+gemeldeten Decoderfehler) und anhand je eines mit FFmpeg erzeugten Vorschaubilds
+visuell geprüft. HD und SD zeigen jeweils beide Objektive übereinander.
+Alle acht Anmeldungen melden erneut `deviceVersion=32`, `channelCount=1`,
+`videoSplicing=7`. Erfolgreiche Streamanmeldungen liefern Kommando 401,
+Ergebnis 1001, 32 Byte.
+
+**Ergebnis:** Auch mit den zusätzlichen SDK-Feldern und in SD ist keine native
+Einzelobjektiv-Auswahl über den geprüften binären LAN-Zugang nachgewiesen.
+Eine vollständige V3-Sitzung wurde auch in dieser Nachprüfung nicht hergestellt;
+die früheren `vsspec`-Versuche wurden nicht erneut ausgeführt. Ungeprüfte
+Protokollwege bleiben daher offen. Lokales Zuschneiden ist weiterhin die
+nachgewiesen praktikable Lösung, nicht eine bewiesene Firmwarebeschränkung.
+
+Es wurden keine gespeicherten Kameraeinstellungen geändert und keine
+PTZ-Befehle gesendet. WildCams Laufzeitcode und Kamerakonfiguration blieben
+unverändert. Das Prüfskript `recheck-native.py`, die maschinenlesbaren Ergebnisse
+`recheck-native-results.json` und private Medien `recheck-*.hevc`/`recheck-*.png`
+liegen ausschließlich unter `/tmp/d57-analysis/`; Zugangsdaten und Sitzungstickets
+werden vom Prüfskript nicht ausgegeben.
+
+## Lokale Bildaufteilung: zwei Fenster mit eigenem Zoom
+
+`lens_view.py` stellt für V380-Kameras mit Modell `D57` zwei separate Fenster
+bereit: oben fest, unten beweglich. Ein `CameraThread` mit einer Bridge und
+einem Decoder versorgt beide Fenster; die Bildhälften werden erst nach dem
+Decodieren ausgewählt. HD ergibt zweimal 2304 × 1296, SD zweimal 640 × 360.
+Der Originalframe für Aufzeichnung, Snapshots und Erkennung bleibt unverändert.
+
+Jedes Fenster besitzt eigenen Mausrad-/Tastenzoom und Rechteckauswahl.
+Doppelklick oder „Ganzes Bild“ setzt nur dessen Zoom zurück. PTZ erscheint
+ausschließlich unten und nutzt den bestehenden sitzungsgebundenen Controller.
+Manuelles Deaktivieren von PTZ bleibt erhalten. Loslassen, Fokusverlust,
+Ausblenden oder Schließen des unteren Fensters fordert Stop an; der bestehende
+0,35-Sekunden-Watchdog bleibt wirksam.
+
+Die Fenster öffnen beim Streamstart. Das Schließen eines Fensters stoppt weder
+den gemeinsamen Stream noch das andere Fenster. Ein Klick auf die D57-Vorschau
+öffnet geschlossene Fenster erneut. Streamstopp, Kamerawechsel im Editor,
+Entfernen der Kamera und Anwendungsschließen räumen die Fenster auf.
+Bei Verbindungsverlust werden alte Bilder entfernt und PTZ deaktiviert.
+
+**Prüfung:** Alle 48 Offline-Tests bestanden, darunter 19 neue GUI-/Integrationstests
+für Bildhälften, unabhängigen Zoom, Ausschnittkoordinaten, Auflösungswechsel,
+Fensterlebenszyklus, gemeinsame Frame-Verteilung, PTZ-Zuordnung und Reconnect-Anzeige.
+Ein zusätzlicher Offscreen-Durchlauf mit vollständigem `MainWindow` und
+`CameraThread` decodierte 15 Bilder aus der vorher aufgenommenen D57-HEVC-Datei:
+Quelle `(2592, 2304, 3)`, beide Fenster `(1296, 2304, 3)`, ein Kamerathread,
+unabhängige Zoomausschnitte und Wiederöffnen ohne zweiten Thread. Die Fenster
+wurden anhand von Screenshots visuell geprüft. PTZ-Tasten wurden dabei gegen
+einen Mock-Controller geprüft, ohne Motorbewegung.
+
+**Livegrenze:** Zwei neue Live-Durchläufe lieferten keine Bilder und meldeten
+V380-Zeitüberschreitungen. Eine anschließende direkte Prüfung mit dem unveränderten
+`V380Client` scheiterte bereits beim TCP-Verbindungsaufbau nach fünf Sekunden.
+Die neue Fensterdarstellung ist daher nicht als erneut live abgenommen zu werten.
+Prüfskript und private Screenshots liegen unter `/tmp/d57-analysis/`
+(`test-local-split.py`, `local-split-windows.png`, `local-split-zoom.png`).
+Die laufende WildCam-Instanz und ihre gespeicherte Kamerakonfiguration wurden
+nicht verändert.

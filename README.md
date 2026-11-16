@@ -431,7 +431,17 @@ WildCam supports local video from the D57 tested with **V380 Pro**, using TCP
 **8800**. No RTSP service or firmware modification is required. `v380.py`
 authenticates with the **local device user and password**, reassembles and
 AES-decrypts the media, and serves it on loopback for OpenCV/FFmpeg. The tested
-D57 delivers **H.265/HEVC, 2304 × 2592, 12 fps**. Its full native frame is retained without cropping.
+D57 delivers **H.265/HEVC, 2304 × 2592, 12 fps**. Recording, snapshots and
+object detection retain the full native frame.
+
+Starting a camera with model **D57** opens two separate, resizable windows:
+**upper – fixed** and **lower – movable**, each showing **2304 × 1296** in HD.
+Both share one connection and decoder. Zoom each window independently with the
+mouse wheel, the +/− buttons or by dragging a rectangle; double-click or **Full image**
+resets that window's zoom. Only the lower window has PTZ controls (unless manually
+disabled). Closing either window leaves the stream and the other window running;
+clicking the D57 camera preview reopens closed windows. Stopping the stream closes
+both windows. This is local image splitting, not two native camera streams.
 
 1. Install/update dependencies: `python -m pip install -r requirements.txt`
    (`cryptography` is required for V380 authentication and video).
