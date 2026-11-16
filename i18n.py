@@ -219,7 +219,9 @@ TRANSLATIONS = {
         "lens.reset": "Ganzes Bild",
         "lens.zoom_in": "Hineinzoomen",
         "lens.zoom_out": "Herauszoomen",
-        "lens.zoom_hint": "Mausrad oder Rechteck ziehen: Zoom. Doppelklick: ganzes Bild.",
+        "lens.zoom_hint": "Mausrad oder Rechteck ziehen: Zoom. Doppelklick: Zoom zurücksetzen oder Kachel vergrößern/verkleinern.",
+        "lens.expand": "Kachel vergrößern / zurück zum Raster",
+        "lens.close": "Bildhälfte ausblenden",
     },
     "en": {
         "app.title": "Reolink Multi-Camera Viewer",
@@ -438,7 +440,9 @@ TRANSLATIONS = {
         "lens.reset": "Full image",
         "lens.zoom_in": "Zoom in",
         "lens.zoom_out": "Zoom out",
-        "lens.zoom_hint": "Mouse wheel or drag a rectangle to zoom. Double-click to reset.",
+        "lens.zoom_hint": "Mouse wheel or drag a rectangle to zoom. Double-click to reset zoom or expand/restore the tile.",
+        "lens.expand": "Expand tile / return to grid",
+        "lens.close": "Hide lens view",
     },
 }
 

@@ -1,5 +1,5 @@
 from PyQt6.QtCore import QEvent, QRect, Qt, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget
 
 from i18n import tr
 from v380 import is_v380_url
@@ -11,37 +11,47 @@ def has_split_lenses(camera):
                 and str(camera.get('model', '')).upper() == 'D57')
 
 
-class LensViewWindow(QWidget):
+class LensView(QWidget):
     move_requested = pyqtSignal(str)
     stop_requested = pyqtSignal()
-    closed = pyqtSignal()
+    close_requested = pyqtSignal()
+    expand_requested = pyqtSignal()
 
     def __init__(self, camera_id, camera_name, half, *, ptz=False, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
+        super().__init__(parent)
         if half not in ('upper', 'lower'):
             raise ValueError('Invalid lens half')
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.camera_id = camera_id
         self.camera_name = camera_name
         self.half = half
         self.frame = None
         self.crop_rect = None
-        self.resize(720, 470)
-        self.setMinimumSize(320, 240)
+        self.setMinimumSize(0, 180)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(2, 2, 2, 2)
         controls = QHBoxLayout()
         self.title_label = QLabel()
-        controls.addWidget(self.title_label)
-        controls.addStretch()
+        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        controls.addWidget(self.title_label, 1)
         self.zoom_in_button = QPushButton('+')
         self.zoom_out_button = QPushButton('−')
         self.reset_button = QPushButton()
-        for button in (self.zoom_out_button, self.zoom_in_button, self.reset_button):
+        self.expand_button = QPushButton()
+        self.expand_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
+        self.close_button = QPushButton()
+        self.close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+        self.close_button.setStyleSheet('background-color: #dc3545; border-radius: 12px;')
+        for button in (self.zoom_out_button, self.zoom_in_button, self.expand_button, self.close_button):
+            button.setFixedSize(28, 24)
+        for button in (self.zoom_out_button, self.zoom_in_button, self.reset_button,
+                       self.expand_button, self.close_button):
             controls.addWidget(button)
         self.zoom_in_button.clicked.connect(lambda: self.zoom(1.5))
         self.zoom_out_button.clicked.connect(lambda: self.zoom(1 / 1.5))
         self.reset_button.clicked.connect(self.reset_zoom)
+        self.expand_button.clicked.connect(self.expand_requested.emit)
+        self.close_button.clicked.connect(self.close_requested.emit)
         layout.addLayout(controls)
         self.label = PreviewLabel(camera_id, self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -49,8 +59,9 @@ class LensViewWindow(QWidget):
         self.label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         self.label.set_selection_enabled(True)
         self.label.region_selected.connect(self._select_region)
-        self.label.double_clicked.connect(self.reset_zoom)
+        self.label.double_clicked.connect(self._double_clicked)
         self.label.installEventFilter(self)
+        self.window().installEventFilter(self)
         layout.addWidget(self.label, 1)
         self.ptz_pad = PtzPad(self.label) if half == 'lower' and ptz else None
         if self.ptz_pad is not None:
@@ -63,11 +74,13 @@ class LensViewWindow(QWidget):
 
     def retranslate_ui(self):
         title = f"{self.camera_name} — {tr('lens.' + self.half)}"
-        self.setWindowTitle(title)
         self.title_label.setText(title)
+        self.title_label.setToolTip(title)
         self.reset_button.setText(tr('lens.reset'))
         self.zoom_in_button.setToolTip(tr('lens.zoom_in'))
         self.zoom_out_button.setToolTip(tr('lens.zoom_out'))
+        self.expand_button.setToolTip(tr('lens.expand'))
+        self.close_button.setToolTip(tr('lens.close'))
         self.label.setToolTip(tr('lens.zoom_hint'))
         if self.ptz_pad is not None:
             self.ptz_pad.retranslate_ui()
@@ -122,6 +135,12 @@ class LensViewWindow(QWidget):
         self.label.clear_selection()
         self._render()
 
+    def _double_clicked(self, *_args):
+        if self.crop_rect is not None:
+            self.reset_zoom()
+        else:
+            self.expand_requested.emit()
+
     def _select_region(self, _camera_id, selection):
         if self.frame is None:
             return
@@ -160,6 +179,8 @@ class LensViewWindow(QWidget):
         self._position_ptz()
 
     def eventFilter(self, obj, event):
+        if obj is self.window() and event.type() == QEvent.Type.WindowDeactivate:
+            self.stop_requested.emit()
         if obj is self.label:
             if event.type() == QEvent.Type.Resize:
                 self._render()
@@ -188,5 +209,4 @@ class LensViewWindow(QWidget):
     def closeEvent(self, event):
         self.stop_requested.emit()
         self.frame = None
-        self.closed.emit()
         super().closeEvent(event)

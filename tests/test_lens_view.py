@@ -1,16 +1,18 @@
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import unittest
+import tempfile
 from unittest.mock import MagicMock, patch
 
 import numpy as np
 from PyQt6.QtCore import QEvent, QPointF, QRect, Qt
 from PyQt6.QtGui import QWheelEvent
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QWidget
 from PyQt6.QtTest import QTest
 
-from lens_view import LensViewWindow, has_split_lenses
+from lens_view import LensView, has_split_lenses
 from main_window import MainWindow
+from widgets import PreviewLabel
 
 
 CAMERA = {'id': 7, 'name': 'Garden', 'model': 'D57',
@@ -24,12 +26,17 @@ class LensViewTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.top = LensViewWindow(7, 'Garden', 'upper')
-        self.bottom = LensViewWindow(7, 'Garden', 'lower', ptz=True)
+        self.host = QWidget()
+        self.host.resize(1440, 470)
+        self.top = LensView(7, 'Garden', 'upper', parent=self.host)
+        self.bottom = LensView(7, 'Garden', 'lower', ptz=True, parent=self.host)
+        self.bottom.move(720, 0)
+        self.host.show()
         self.frame = np.zeros((200, 160, 3), dtype=np.uint8)
         self.frame[:100] = (0, 0, 255)
         self.frame[100:] = (255, 0, 0)
         for window in (self.top, self.bottom):
+            window.resize(720, 470)
             window.show()
             window.update_frame(self.frame)
         self.app.processEvents()
@@ -37,6 +44,8 @@ class LensViewTests(unittest.TestCase):
     def tearDown(self):
         self.top.close()
         self.bottom.close()
+        self.host.close()
+        self.host.deleteLater()
         self.app.processEvents()
 
     def test_only_known_d57_is_split(self):
@@ -146,127 +155,216 @@ class LensIntegrationTests(unittest.TestCase):
         cls.app = QApplication.instance() or QApplication([])
 
     def setUp(self):
-        self.main = MainWindow.__new__(MainWindow)
-        QMainWindow.__init__(self.main)
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        for target, kwargs in (
+            ('main_window.DEFAULT_RECORDING_PATH', {'new': self.temp.name}),
+            ('main_window.MainWindow.load_config', {}),
+            ('main_window.MainWindow.save_config', {}),
+            ('main_window.MainWindow.refresh_proxy_status', {}),
+        ):
+            patcher = patch(target, **kwargs)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.main = MainWindow()
         self.main.cameras = [dict(CAMERA)]
-        self.main.lens_windows = {}
-        self.main.camera_threads = {}
-        self.main.camera_widgets = {}
-        self.main._ptz_controllers = {}
-        self.main._closing = False
-        self.main.selected_camera_id = None
-        self.main.selected_camera_ids = []
-        self.main.zoomed_camera_id = None
-        self.main.detection_worker = None
+        for cid in (8, 9, 10):
+            self.main.cameras.append({'id': cid, 'name': f'Camera {cid}', 'url': 'rtsp://192.0.2.1/video'})
+        for camera in self.main.cameras:
+            self.main._get_or_create_camera_widget(camera)
+            thread = MagicMock()
+            thread.measured_fps = 0.0
+            self.main.camera_threads[camera['id']] = thread
+        self.main.resize(1400, 900)
+        self.main.show()
 
     def tearDown(self):
-        self.main._close_lens_windows()
+        self.main.detection_worker = None
+        for thread in self.main.camera_threads.values():
+            thread.isRunning.return_value = False
+        self.main.close()
         self.main.deleteLater()
         self.app.processEvents()
 
-    def test_two_windows_one_thread_and_shared_frame(self):
+    def select(self, ids):
+        self.main.selected_camera_ids = list(ids)
+        self.main._rebuild_multi_view_layout()
+        self.app.processEvents()
+
+    def test_two_embedded_tiles_one_thread_and_shared_frame(self):
+        self.select([7])
+        del self.main.camera_threads[7]
         with patch('main_window.CameraThread') as factory, patch.object(self.main, '_prebuffer_seconds', return_value=0):
             thread = self.main._start_camera_thread(CAMERA)
             self.main.start_single_stream(7)
             factory.assert_called_once()
             thread.start.assert_called_once()
-        self.assertEqual(set(self.main.lens_windows), {(7, 'upper'), (7, 'lower')})
+        self.assertEqual(set(self.main.lens_views), {(7, 'upper'), (7, 'lower')})
         frame = np.zeros((200, 160, 3), dtype=np.uint8)
         self.main.update_camera_frame(frame, 7)
-        for window in self.main.lens_windows.values():
-            self.assertTrue(np.shares_memory(window.frame, frame))
+        for view in self.main.lens_views.values():
+            self.assertTrue(np.shares_memory(view.frame, frame))
+            self.assertFalse(view.isWindow())
+            self.assertIs(view.window(), self.main)
         self.main.selected_camera_id = 7
         self.assertIsNone(self.main._active_ptz_camera_id())
 
-    def test_close_one_window_keeps_stream_and_other_view_then_reopens(self):
-        thread = MagicMock()
-        self.main.camera_threads[7] = thread
-        self.main._show_lens_windows(7)
-        bottom = self.main.lens_windows[(7, 'lower')]
-        self.main.lens_windows[(7, 'upper')].close()
-        self.assertNotIn((7, 'upper'), self.main.lens_windows)
-        self.assertIs(self.main.lens_windows[(7, 'lower')], bottom)
+    def test_close_one_tile_keeps_stream_and_other_view_then_reopens(self):
+        self.select([7, 8])
+        thread = self.main.camera_threads[7]
+        top = self.main.lens_views[(7, 'upper')]
+        bottom = self.main.lens_views[(7, 'lower')]
+        top.close_button.click()
+        self.assertTrue(top.isHidden())
+        self.assertIs(self.main.lens_views[(7, 'lower')], bottom)
+        self.assertTrue(bottom.isVisible())
         thread.stop.assert_not_called()
-        self.main._show_lens_windows(7)
-        self.assertEqual(len(self.main.lens_windows), 2)
-        self.assertIs(self.main.lens_windows[(7, 'lower')], bottom)
+        self.main.select_camera(7)
+        self.assertTrue(top.isVisible())
+        self.assertIs(self.main.lens_views[(7, 'lower')], bottom)
 
     def test_ptz_routes_to_shared_controller_even_when_other_camera_selected(self):
-        self.main.camera_threads[7] = MagicMock()
+        self.select([7, 8])
         controller = MagicMock()
         self.main._ptz_controllers[7] = controller
-        self.main._show_lens_windows(7)
         self.main.update_camera_frame(np.zeros((200, 160, 3), dtype=np.uint8), 7)
         self.main.selected_camera_id = 99
-        bottom = self.main.lens_windows[(7, 'lower')]
+        bottom = self.main.lens_views[(7, 'lower')]
         bottom.move_requested.emit('right')
         controller.move.assert_called_once_with('right')
-        bottom.close()
+        bottom.close_button.click()
         controller.stop.assert_called()
 
-    def test_stop_closes_both_windows(self):
-        thread = MagicMock()
-        self.main.camera_threads[7] = thread
-        self.main._show_lens_windows(7)
+    def test_stop_clears_both_tiles_without_removing_selection(self):
+        self.select([7])
+        self.main.update_camera_frame(np.zeros((200, 160, 3), dtype=np.uint8), 7)
         self.assertTrue(self.main._stop_camera_thread(7))
-        self.assertFalse(self.main.lens_windows)
+        self.assertEqual(len(self.main.lens_views), 2)
+        self.assertTrue(all(w.frame is None for w in self.main.lens_views.values()))
         self.assertNotIn(7, self.main.camera_threads)
 
     def test_ptz_opt_out_and_other_models(self):
         self.main.cameras[0]['ptz'] = False
-        self.main._show_lens_windows(7)
-        self.assertIsNone(self.main.lens_windows[(7, 'lower')].ptz_pad)
-        self.main._close_lens_windows()
+        self.select([7])
+        self.assertIsNone(self.main.lens_views[(7, 'lower')].ptz_pad)
         self.main.cameras[0]['model'] = 'other'
-        self.main._show_lens_windows(7)
-        self.assertFalse(self.main.lens_windows)
+        self.select([7])
+        self.assertFalse(self.main.lens_views)
+        self.assertIn(7, self.main.multi_view_labels)
 
     def test_disconnect_updates_both_views_without_new_thread(self):
-        self.main._show_lens_windows(7)
+        self.select([7])
+        thread = self.main.camera_threads[7]
         self.main.update_camera_frame(np.zeros((200, 160, 3), dtype=np.uint8), 7)
         self.main.update_camera_status(False, 7, 'Reconnecting')
-        self.assertTrue(all(w.frame is None for w in self.main.lens_windows.values()))
-        self.assertFalse(self.main.camera_threads)
+        self.assertTrue(all(w.frame is None for w in self.main.lens_views.values()))
+        self.assertIs(self.main.camera_threads[7], thread)
 
     def test_full_frame_reaches_preview_and_detection_unchanged(self):
-        self.main._show_lens_windows(7)
+        self.select([7])
         self.main.cameras[0]['detection_enabled'] = True
         self.main.detection_worker = MagicMock()
-        widget = MagicMock()
-        self.main.camera_widgets[7] = widget
         frame = np.zeros((200, 160, 3), dtype=np.uint8)
         self.main.update_camera_frame(frame, 7)
-        self.assertIs(widget.update_frame.call_args.args[0], frame)
+        self.assertIs(self.main.camera_widgets[7].last_frame, frame)
         self.assertIs(self.main.detection_worker.submit_frame.call_args.args[2], frame)
         self.assertEqual(frame.shape, (200, 160, 3))
 
     def test_disconnect_does_not_restore_stale_cached_frame(self):
-        widget = MagicMock()
-        widget.last_frame = np.zeros((200, 160, 3), dtype=np.uint8)
-        self.main.camera_widgets[7] = widget
-        self.main.camera_threads[7] = MagicMock()
-        self.main._show_lens_windows(7)
+        self.select([7])
+        widget = self.main.camera_widgets[7]
+        self.main.update_camera_frame(np.zeros((200, 160, 3), dtype=np.uint8), 7)
         self.main.update_camera_status(False, 7, 'Reconnecting')
         self.assertIsNone(widget.last_frame)
-        self.main._close_lens_windows()
-        self.main._show_lens_windows(7)
-        self.assertTrue(all(w.frame is None for w in self.main.lens_windows.values()))
+        self.select([7])
+        self.assertTrue(all(w.frame is None for w in self.main.lens_views.values()))
 
     def test_start_ignores_cached_frame_from_previous_session(self):
-        widget = MagicMock()
+        self.select([7])
+        widget = self.main.camera_widgets[7]
         widget.last_frame = np.zeros((200, 160, 3), dtype=np.uint8)
-        self.main.camera_widgets[7] = widget
         with patch('main_window.CameraThread'), patch.object(self.main, '_prebuffer_seconds', return_value=0):
             self.main._start_camera_thread(CAMERA)
-        self.assertTrue(all(w.frame is None for w in self.main.lens_windows.values()))
+        self.assertTrue(all(w.frame is None for w in self.main.lens_views.values()))
 
-    def test_click_reopens_windows_in_multi_view_without_extra_thread(self):
-        self.main.selected_camera_ids = [7, 8]
-        self.main.camera_threads[7] = MagicMock()
+    def test_click_reopens_tiles_in_multi_view_without_extra_thread(self):
+        self.select([7, 8])
         with patch('main_window.CameraThread') as factory:
             self.main.select_camera(7)
             factory.assert_not_called()
-        self.assertEqual(len(self.main.lens_windows), 2)
+        self.assertEqual(len(self.main.lens_views), 2)
+
+    def test_four_cameras_produce_five_tiles_in_main_grid(self):
+        self.select([8, 9, 10, 7])
+        self.assertEqual(set(self.main.multi_view_labels), {8, 9, 10})
+        self.assertEqual(len(self.main.lens_views), 2)
+        self.assertEqual(self.main.big_preview_layout.count(), 3)
+        self.assertEqual(self.main.big_preview_layout.itemAt(1).layout().itemAt(1).widget(),
+                         self.main.lens_views[(7, 'upper')])
+        self.assertEqual(self.main.big_preview_layout.itemAt(2).layout().itemAt(0).widget(),
+                         self.main.lens_views[(7, 'lower')])
+        self.assertTrue(all(not w.isWindow() for w in self.main.lens_views.values()))
+        self.assertEqual(len([label for label in self.main.big_preview_container.findChildren(PreviewLabel)
+                              if label.isVisible()]), 5)
+
+    def test_double_click_expands_one_half_and_restores_grid_with_zoom_preserved(self):
+        self.select([7, 8, 9])
+        self.main.update_camera_frame(np.zeros((200, 160, 3), dtype=np.uint8), 7)
+        top, bottom = (self.main.lens_views[(7, half)] for half in ('upper', 'lower'))
+        bottom.zoom(2)
+        crop = QRect(bottom.crop_rect)
+        top.label.double_clicked.emit(7)
+        self.app.processEvents()
+        self.assertEqual(self.main.zoomed_lens_key, (7, 'upper'))
+        self.assertTrue(top.isVisible())
+        self.assertTrue(bottom.isHidden())
+        self.assertFalse(self.main.multi_view_labels)
+        self.assertEqual(len([label for label in self.main.big_preview_container.findChildren(PreviewLabel)
+                              if label.isVisible()]), 1)
+        self.assertEqual(self.main.big_preview_layout.count(), 1)
+        top.label.double_clicked.emit(7)
+        self.app.processEvents()
+        self.assertIsNone(self.main.zoomed_lens_key)
+        self.assertTrue(bottom.isVisible())
+        self.assertEqual(bottom.crop_rect, crop)
+        self.assertEqual(set(self.main.multi_view_labels), {8, 9})
+
+    def test_other_camera_expand_restore_keeps_lens_zoom(self):
+        self.select([7, 8])
+        self.main.update_camera_frame(np.zeros((200, 160, 3), dtype=np.uint8), 7)
+        bottom = self.main.lens_views[(7, 'lower')]
+        bottom.zoom(2)
+        crop = QRect(bottom.crop_rect)
+        self.main._on_big_preview_label_double_clicked(8)
+        self.assertTrue(bottom.isHidden())
+        self.main._on_big_preview_label_double_clicked(8)
+        self.assertTrue(bottom.isVisible())
+        self.assertEqual(bottom.crop_rect, crop)
+
+    def test_single_camera_selection_and_restore_show_two_embedded_views(self):
+        self.main.select_camera(7)
+        self.assertEqual(len(self.main.lens_views), 2)
+        self.assertTrue(all(v.isVisible() for v in self.main.lens_views.values()))
+        with patch('main_window.QTimer.singleShot'):
+            self.main._restore_preview_state()
+        self.assertEqual(len(self.main.lens_views), 2)
+        self.main.select_camera(8)
+        self.assertFalse(self.main.lens_views)
+        self.assertIn(8, self.main.multi_view_labels)
+
+    def test_closing_both_halves_deselects_camera_without_stopping_stream(self):
+        self.main.on_camera_selection_changed(7, True)
+        self.main.lens_views[(7, 'upper')].close_button.click()
+        self.main.lens_views[(7, 'lower')].close_button.click()
+        self.assertNotIn(7, self.main.selected_camera_ids)
+        self.assertFalse(self.main.camera_widgets[7].view_checkbox.isChecked())
+        self.assertFalse(self.main.lens_views)
+        self.main.camera_threads[7].stop.assert_not_called()
+
+    def test_unselected_stream_start_never_opens_views(self):
+        with patch('main_window.CameraThread'), patch.object(self.main, '_prebuffer_seconds', return_value=0):
+            self.main._start_camera_thread(CAMERA)
+        self.assertFalse(self.main.lens_views)
 
 
 if __name__ == '__main__':
