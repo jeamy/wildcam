@@ -1,4 +1,5 @@
 """Offline protocol and integration checks; no camera or credentials required."""
+import errno
 import os
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import socket
@@ -230,6 +231,93 @@ class IntegrationTests(unittest.TestCase):
             thread.run()
         self.assertEqual(bridge.call_count, 1)
         self.assertFalse(thread.running)
+
+    def test_unreachable_camera_is_asleep_but_refused_is_not(self):
+        for failure in (socket.timeout('timed out'), OSError(errno.EHOSTUNREACH, 'No route to host')):
+            client = V380Client(URL)
+            with patch('v380.socket.create_connection', side_effect=failure):
+                with self.assertRaises(V380Error) as caught: client._connect()
+            self.assertTrue(caught.exception.asleep)
+            self.assertFalse(caught.exception.permanent)
+        client = V380Client(URL)
+        with patch('v380.socket.create_connection', side_effect=ConnectionRefusedError()):
+            with self.assertRaises(ConnectionRefusedError): client._connect()
+
+    def test_recv_timeout_is_a_stall(self):
+        client = V380Client(URL)
+        client.sock = MagicMock()
+        client.sock.recv.side_effect = socket.timeout('timed out')
+        with self.assertRaises(V380Error) as caught: client._read(12)
+        self.assertTrue(caught.exception.stalled)
+        self.assertFalse(caught.exception.asleep)
+
+    def _bridge_with_failure(self, failure, window=None):
+        fake = MagicMock()
+        fake.frames.side_effect = failure
+        patches = [patch('v380.V380Client', return_value=fake)]
+        if window is not None:
+            patches.append(patch('v380.SLEEP_STALL_WINDOW', window))
+        for p in patches: p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        bridge = V380Bridge(URL)
+        self.addCleanup(bridge.close)
+        host, port = bridge.url[len('tcp://'):].split(':')
+        with socket.create_connection((host, int(port)), timeout=2) as conn:
+            conn.settimeout(2)
+            self.assertEqual(conn.recv(1), b'')  # bridge closes after the failure
+        return bridge
+
+    def test_bridge_marks_early_stall_as_asleep(self):
+        bridge = self._bridge_with_failure(V380Error('Camera read timed out', stalled=True))
+        self.assertTrue(bridge.asleep)
+        self.assertFalse(bridge.permanent_error)
+
+    def test_bridge_late_stall_and_other_errors_are_not_asleep(self):
+        late = self._bridge_with_failure(V380Error('Camera read timed out', stalled=True), window=0)
+        self.assertFalse(late.asleep)
+        other = self._bridge_with_failure(V380Error('Invalid media fragment header'))
+        self.assertFalse(other.asleep)
+
+    def test_asleep_camera_retries_slowly_with_wake_hint(self):
+        import stream
+        from i18n import tr
+        thread = stream.CameraThread(1, URL)
+        bridge = MagicMock(url='tcp://127.0.0.1:9', error='Camera not reachable (asleep?)',
+                           asleep=True, permanent_error=False)
+        cap = MagicMock()
+        cap.isOpened.return_value = False
+        statuses, waits = [], []
+        thread.connection_status.connect(lambda ok, cid, msg: statuses.append(msg))
+
+        def wait(seconds):
+            waits.append(seconds)
+            thread.running = False
+        with patch('stream.V380Bridge', return_value=bridge), \
+                patch.object(thread, '_open_capture', return_value=cap), \
+                patch.object(thread, '_wait_before_reconnect', side_effect=wait):
+            thread.run()
+        self.assertEqual(waits, [stream.V380_ASLEEP_RETRY_SECONDS])
+        self.assertIn(tr('camera.v380.asleep'), statuses)
+        self.assertNotIn(tr('camera.preview.retrying'), statuses)
+
+    def test_reconnect_is_fast_only_after_a_session_that_streamed(self):
+        import stream
+        for frames, expected in ((5, stream.V380_FAST_RECONNECT_SECONDS), (0, 5)):
+            thread = stream.CameraThread(1, URL)
+            waits = []
+
+            def session():
+                thread._session_frames = frames
+                raise Exception('Stream interrupted')
+
+            def wait(seconds):
+                waits.append(seconds)
+                thread.running = False
+            with patch('stream.V380_SLEEP_STALL_WINDOW', 0), \
+                    patch.object(thread, '_connect_and_stream', side_effect=session), \
+                    patch.object(thread, '_wait_before_reconnect', side_effect=wait):
+                thread.run()
+            self.assertEqual(waits, [expected])
 
     def test_stream_routing_and_no_onvif_ptz_probe(self):
         from stream import CameraThread

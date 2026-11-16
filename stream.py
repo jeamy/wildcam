@@ -19,7 +19,14 @@ from camera_utils import (
 )
 from i18n import tr
 from netvue import NetvueBridge, is_netvue_url
-from v380 import V380Bridge, V380Error, is_v380_url
+from v380 import SLEEP_STALL_WINDOW as V380_SLEEP_STALL_WINDOW, V380Bridge, V380Error, is_v380_url
+
+# Retry interval while a battery V380 camera sleeps: each attempt that hits a
+# short self-wake costs camera battery, and only the V380 Pro app can wake it.
+V380_ASLEEP_RETRY_SECONDS = 15
+# An awake D57 falls asleep 10-15 s after its stream ends; reconnecting within
+# 10 s keeps it awake (measured). Used after a session that really streamed.
+V380_FAST_RECONNECT_SECONDS = 1
 
 
 class CameraThread(QThread):
@@ -51,6 +58,7 @@ class CameraThread(QThread):
         # object detection is enabled for this camera.
         self._frame_buffer_seconds = max(0.0, float(prebuffer_seconds))
         self.cap = None
+        self._session_frames = 0
         self.reconnect_delay = 5  # Mehr Zeit für Akku-Kameras
         self._host, self._port, _user, _password = _parse_rtsp_url(rtsp_url)
         self._is_proxy_stream = is_proxy_stream_url(rtsp_url)
@@ -79,20 +87,36 @@ class CameraThread(QThread):
         self.running = True
         
         while self.running:
+            asleep = False
+            self._session_frames = 0
+            session_start = time.monotonic()
             try:
                 self._connect_and_stream()
             except Exception as e:
                 if self._is_v380 and ((isinstance(e, V380Error) and e.permanent) or
                                       (self._lan_bridge and self._lan_bridge.permanent_error)):
                     self.running = False
-                self.connection_status.emit(False, self.camera_id, tr("error.prefix", error=str(e)))
+                asleep = self._is_v380 and (
+                    (isinstance(e, V380Error) and e.asleep) or
+                    bool(self._lan_bridge and self._lan_bridge.asleep))
+                if asleep:
+                    self.connection_status.emit(False, self.camera_id, tr("camera.v380.asleep"))
+                else:
+                    self.connection_status.emit(False, self.camera_id, tr("error.prefix", error=str(e)))
             finally:
                 self._release_capture()
                 self._release_lan_bridge()
 
             if self.running:
-                self.connection_status.emit(False, self.camera_id, tr("camera.preview.retrying"))
-                self._wait_before_reconnect(self.reconnect_delay)
+                if asleep:
+                    self._wait_before_reconnect(V380_ASLEEP_RETRY_SECONDS)
+                elif (self._is_v380 and self._session_frames > 0 and
+                      time.monotonic() - session_start >= V380_SLEEP_STALL_WINDOW):
+                    self.connection_status.emit(False, self.camera_id, tr("camera.preview.retrying"))
+                    self._wait_before_reconnect(V380_FAST_RECONNECT_SECONDS)
+                else:
+                    self.connection_status.emit(False, self.camera_id, tr("camera.preview.retrying"))
+                    self._wait_before_reconnect(self.reconnect_delay)
         
         self._cleanup()
 
@@ -262,6 +286,7 @@ class CameraThread(QThread):
                 continue
 
             failed_reads = 0
+            self._session_frames += 1
             self._remember_frame(frame)
             
             now = time.monotonic()

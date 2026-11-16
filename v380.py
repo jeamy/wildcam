@@ -7,6 +7,7 @@ Only the verified v31/v32, communication-v20 media variant is supported.
 """
 from __future__ import annotations
 
+import errno
 import secrets
 import socket
 import struct
@@ -20,6 +21,11 @@ DEFAULT_PORT = 8800
 _DISCOVERY_LOCK = threading.Lock()
 _MAX_FRAME = 16 * 1024 * 1024
 PTZ_PULSE_SECONDS = 0.35
+# Battery D57: woken only by the vendor cloud (V380 Pro app). About 20-30 s
+# after the last stream ends it stops answering TCP; a stream started while it
+# dozes stalls after a few seconds. Both mean "asleep", not a broken stream.
+SLEEP_STALL_WINDOW = 20.0  # burst (~5 s) + 8 s read timeout + login
+_ASLEEP_ERRNOS = {errno.EHOSTUNREACH, errno.ENETUNREACH, errno.EHOSTDOWN, errno.ETIMEDOUT}
 _PTZ_AXES = {
     'left': (1001, 1000), 'right': (1002, 1000),
     'up': (1000, 1003), 'down': (1000, 1004),
@@ -34,9 +40,11 @@ def ptz_packet(direction=None):
 
 
 class V380Error(Exception):
-    def __init__(self, message, *, permanent=False):
+    def __init__(self, message, *, permanent=False, asleep=False, stalled=False):
         super().__init__(message)
         self.permanent = permanent
+        self.asleep = asleep    # camera does not answer TCP at all
+        self.stalled = stalled  # camera stopped sending mid-session
 
 
 def is_v380_url(url):
@@ -210,7 +218,14 @@ class V380Client:
     def _connect(self):
         if self._closed.is_set():
             raise V380Error('Connection closed')
-        sock = socket.create_connection((self.params['host'], self.params['port']), timeout=5)
+        try:
+            sock = socket.create_connection((self.params['host'], self.params['port']), timeout=5)
+        except socket.timeout:
+            raise V380Error('Camera not reachable (asleep?)', asleep=True) from None
+        except OSError as exc:
+            if exc.errno in _ASLEEP_ERRNOS:
+                raise V380Error('Camera not reachable (asleep?)', asleep=True) from None
+            raise
         self.sock = sock
         if self._closed.is_set():
             self.close()
@@ -225,12 +240,15 @@ class V380Client:
                 raise V380Error('Connection closed')
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise V380Error('Camera read timed out')
+                raise V380Error('Camera read timed out', stalled=True)
             sock = self.sock
             if sock is None:
                 raise V380Error('Connection closed')
             sock.settimeout(remaining)
-            data = sock.recv(count - len(out))
+            try:
+                data = sock.recv(count - len(out))
+            except socket.timeout:
+                raise V380Error('Camera read timed out', stalled=True) from None
             if not data:
                 raise V380Error('Camera closed connection')
             out.extend(data)
@@ -291,7 +309,7 @@ class V380Client:
         deadline = time.monotonic() + 10
         while not self._closed.is_set():
             if time.monotonic() > deadline:
-                raise V380Error('No complete video frame for 10 seconds')
+                raise V380Error('No complete video frame for 10 seconds', stalled=True)
             header = self._read(12)
             total, index, length = struct.unpack_from('<HHH', header, 3)
             if header[0] != 0x7f or not 0 < total <= 8192 or index >= total or not 0 < length <= 20000:
@@ -329,6 +347,7 @@ class V380Bridge:
         self.source_url = url
         self.error = None
         self.permanent_error = False
+        self.asleep = False
         self._stop = threading.Event()
         self._client = None
         self._conn = None
@@ -349,6 +368,7 @@ class V380Bridge:
             except OSError:
                 break
             self._conn = conn
+            started_at = time.monotonic()
             try:
                 conn.settimeout(5)
                 client = V380Client(self.source_url)
@@ -357,6 +377,7 @@ class V380Bridge:
                     break
                 client.open_live()
                 self.error = None
+                self.asleep = False
                 started = False
                 for key_frame, payload in client.frames():
                     if self._stop.is_set():
@@ -369,6 +390,8 @@ class V380Bridge:
                 # Exception text is generated locally or by sockets, never a URL.
                 self.error = str(exc)
                 self.permanent_error = isinstance(exc, V380Error) and exc.permanent
+                self.asleep = isinstance(exc, V380Error) and (
+                    exc.asleep or (exc.stalled and time.monotonic() - started_at < SLEEP_STALL_WINDOW))
             finally:
                 conn.close()
                 self._conn = None

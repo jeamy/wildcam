@@ -429,3 +429,59 @@ Prüfskript und private Screenshots liegen unter `/tmp/d57-analysis/`
 (`test-local-split.py`, `local-split-windows.png`, `local-split-zoom.png`).
 Die laufende WildCam-Instanz und ihre gespeicherte Kamerakonfiguration wurden
 nicht verändert.
+
+## Akkubetrieb: Schlafzustand und Wecken (16.11.2026)
+
+Nutzerbefund: Der D57-Stream erschien in WildCam nur, nachdem V380 Pro gestartet
+und die Kamera dort verbunden war. Die D57 ist laut Nutzer akku-/solarbetrieben;
+die App bietet keine Einstellung für Dauerbetrieb oder Energiesparmodus.
+
+### Messungen (passiv bzw. nur Login und Streamstart, kein PTZ, keine Einstellungen)
+
+| Zeitpunkt | Beobachtung |
+| --- | --- |
+| Ohne App | Ping verliert etwa jede zweite Antwort. Gelegentliche TCP-Verbindungen liefern rund 4–5 s Video (≈ 278 KB), dann verstummt die Kamera; selbst FIN/SYN werden nicht mehr bestätigt. |
+| Mit App verbunden | WildCam-Stream läuft durchgehend (≈ 70–300 KB/s), Ping stabil 10–70 ms. |
+| App geschlossen | Der bereits laufende WildCam-Stream lief über 9 Minuten unverändert weiter (> 50 MB). |
+| WildCam-Stream gestoppt, t = 0–12 s | Ping antwortet, Laufzeiten steigen auf 0,5–2 s (WLAN-Stromsparen). |
+| t = 15 s | Neuer Stream: 37 Bilder in etwa 5 s, danach Lese-Timeout. Der neue Stream hält die Kamera nicht wach. |
+| t = 45, 90, 180, 300 s | TCP-Verbindungsaufbau scheitert (Timeout bzw. „No route to host“). |
+
+Lückentest nach erneutem App-Wecken (App danach geschlossen): 90 s gehaltener Stream,
+danach Trennung und Neuverbindung nach 1, 5 und 10 s Lücke. Jede Neuverbindung lief
+60 s ohne Abriss (je etwa 745 Bilder).
+
+Ergebnis: Die Kamera bleibt wach, solange gestreamt wird oder ein neuer Stream
+innerhalb von etwa 10 s nach dem letzten folgt. Bei 15 s Lücke schlief sie bereits
+ein (Stream reißt nach wenigen Sekunden ab); ab etwa 30 s antwortet sie nicht mehr
+auf TCP. Die Grenze liegt also zwischen 10 und 15 s.
+
+### Kein lokaler Weckweg in V380 Pro 2.2.92
+
+- Der binäre V2-Livepfad (`HSLiveDataV2Transmitter::getDataFromDevice`) sendet nach
+  dem Streamstart nichts mehr; `actionCtrlThreadFunc` sendet nur ereignisgesteuerte
+  Kommandos (u. a. 170 PTZ, 185, 5005), keinen periodischen Keepalive.
+- Das 16-Byte-Kommando **188** alle 3 s (`sendSpeakAudioToDevice`, „send alive“)
+  gehört ausschließlich zum Gegensprech-Audiosocket.
+- Das Wecken von Low-Power-Geräten erfolgt über die Herstellercloud per MQTT
+  (`MqttHelper$RemoteWakeUpResponseWait`, `AppCallDeviceWakeUp`,
+  `EmqWakeUpTimeoutReporter`). Ein LAN-Weckbefehl wurde nicht gefunden.
+
+### Umsetzung in WildCam
+
+- `V380Client._connect()` meldet Verbindungs-Timeout und nicht erreichbaren Host als
+  `V380Error(asleep=True)`; Verbindungsablehnung bleibt ein normaler Fehler.
+- Lese-Timeouts und fehlende Bilder sind `stalled`. `V380Bridge.asleep` wird gesetzt,
+  wenn eine Sitzung innerhalb von `SLEEP_STALL_WINDOW` (20 s) nach Verbindungsannahme
+  abreißt – das beobachtete Muster einer dösenden Kamera.
+- `CameraThread` zeigt dann „Kamera schläft (Akku) – mit der V380-Pro-App aufwecken“
+  und versucht es alle 15 s statt alle 5 s erneut. Jeder Versuch während eines kurzen
+  Eigenweckens startet sonst einen Videoburst und kostet Akku. Nach dem Wecken über
+  die App verbindet WildCam spätestens beim nächsten Versuch; danach darf die App
+  geschlossen werden.
+- Reißt eine Sitzung ab, die länger als 20 s Bilder geliefert hat, verbindet
+  `CameraThread` nach 1 s statt 5 s neu (`V380_FAST_RECONNECT_SECONDS`), damit die
+  Kamera innerhalb des 10-s-Fensters bleibt. Der Lese-Timeout des Clients (8 s)
+  zählt dabei mit; ein sehr später Abriss kann das Fenster trotzdem überschreiten.
+- Nicht umgesetzt: Wecken aus WildCam. Dafür müsste die MQTT-Cloudanmeldung mit dem
+  V380-Konto nachgebaut werden.

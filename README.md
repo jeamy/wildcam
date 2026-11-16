@@ -479,6 +479,15 @@ Other V380 models can be marked as pan/tilt in the edit dialog after verificatio
 Audio is not implemented.
 Concurrent phone access and long-term stability remain unverified.
 
+**Battery operation:** the D57 runs on battery/solar and sleeps when no stream is
+running. Only the vendor cloud (the V380 Pro app) can wake it; there is no local
+wake command. While it sleeps, the tile shows *Camera asleep (battery) – wake it
+with the V380 Pro app* and WildCam retries every 15 seconds. Open the live view in
+V380 Pro once; as soon as WildCam's stream runs, the app may be closed — the
+camera stays awake as long as the stream runs or a new stream follows within
+about 10 seconds (WildCam reconnects after 1 second when an established D57
+stream breaks). After a longer gap it falls asleep again.
+
 Offline tests: `python -m unittest discover -s tests -v`.
 See [D57 analysis and live validation](docs/d57-v380-analysis.md) for protocol
 references, test evidence and remaining limits.
