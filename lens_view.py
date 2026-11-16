@@ -1,9 +1,9 @@
 from PyQt6.QtCore import QEvent, QRect, Qt, pyqtSignal
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QStyle, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout, QWidget
 
 from i18n import tr
 from v380 import is_v380_url
-from widgets import PreviewLabel, PtzPad, letterbox_rgb, rgb_to_pixmap
+from widgets import PreviewLabel, PtzPad, letterbox_rgb, rgb_to_pixmap, zoom_crop
 
 
 def has_split_lenses(camera):
@@ -14,7 +14,6 @@ def has_split_lenses(camera):
 class LensView(QWidget):
     move_requested = pyqtSignal(str)
     stop_requested = pyqtSignal()
-    close_requested = pyqtSignal()
     expand_requested = pyqtSignal()
 
     def __init__(self, camera_id, camera_name, half, *, ptz=False, parent=None):
@@ -29,30 +28,7 @@ class LensView(QWidget):
         self.setMinimumSize(0, 180)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(2, 2, 2, 2)
-        controls = QHBoxLayout()
-        self.title_label = QLabel()
-        self.title_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        controls.addWidget(self.title_label, 1)
-        self.zoom_in_button = QPushButton('+')
-        self.zoom_out_button = QPushButton('−')
-        self.reset_button = QPushButton()
-        self.expand_button = QPushButton()
-        self.expand_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarMaxButton))
-        self.close_button = QPushButton()
-        self.close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
-        self.close_button.setStyleSheet('background-color: #dc3545; border-radius: 12px;')
-        for button in (self.zoom_out_button, self.zoom_in_button, self.expand_button, self.close_button):
-            button.setFixedSize(28, 24)
-        for button in (self.zoom_out_button, self.zoom_in_button, self.reset_button,
-                       self.expand_button, self.close_button):
-            controls.addWidget(button)
-        self.zoom_in_button.clicked.connect(lambda: self.zoom(1.5))
-        self.zoom_out_button.clicked.connect(lambda: self.zoom(1 / 1.5))
-        self.reset_button.clicked.connect(self.reset_zoom)
-        self.expand_button.clicked.connect(self.expand_requested.emit)
-        self.close_button.clicked.connect(self.close_requested.emit)
-        layout.addLayout(controls)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.label = PreviewLabel(camera_id, self)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setStyleSheet('background-color: black; color: white;')
@@ -74,14 +50,7 @@ class LensView(QWidget):
 
     def retranslate_ui(self):
         title = f"{self.camera_name} — {tr('lens.' + self.half)}"
-        self.title_label.setText(title)
-        self.title_label.setToolTip(title)
-        self.reset_button.setText(tr('lens.reset'))
-        self.zoom_in_button.setToolTip(tr('lens.zoom_in'))
-        self.zoom_out_button.setToolTip(tr('lens.zoom_out'))
-        self.expand_button.setToolTip(tr('lens.expand'))
-        self.close_button.setToolTip(tr('lens.close'))
-        self.label.setToolTip(tr('lens.zoom_hint'))
+        self.label.setToolTip(f"{title}\n{tr('lens.zoom_hint')}")
         if self.ptz_pad is not None:
             self.ptz_pad.retranslate_ui()
 
@@ -117,17 +86,8 @@ class LensView(QWidget):
     def zoom(self, factor, anchor=None):
         if self.frame is None or factor <= 0:
             return
-        source = self._source_rect()
         height, width = self.frame.shape[:2]
-        x_ratio, y_ratio = anchor if anchor is not None else (0.5, 0.5)
-        new_width = max(min(16, width), min(width, round(source.width() / factor)))
-        new_height = max(min(16, height), min(height, round(source.height() / factor)))
-        x = round(source.x() + x_ratio * (source.width() - new_width))
-        y = round(source.y() + y_ratio * (source.height() - new_height))
-        self.crop_rect = QRect(max(0, min(width - new_width, x)),
-                               max(0, min(height - new_height, y)), new_width, new_height)
-        if new_width == width and new_height == height:
-            self.crop_rect = None
+        self.crop_rect = zoom_crop(height, width, self.crop_rect, factor, anchor)
         self._render()
 
     def reset_zoom(self, *_args):

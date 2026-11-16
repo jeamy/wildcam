@@ -71,7 +71,7 @@ class LensViewTests(unittest.TestCase):
         self.assertIsNone(self.bottom.crop_rect)
         self.bottom.zoom(4)
         bottom_crop = QRect(self.bottom.crop_rect)
-        QTest.mouseClick(self.top.reset_button, Qt.MouseButton.LeftButton)
+        self.top.reset_zoom()
         self.assertIsNone(self.top.crop_rect)
         self.assertEqual(self.bottom.crop_rect, bottom_crop)
         self.bottom.label.double_clicked.emit(7)
@@ -214,7 +214,7 @@ class LensIntegrationTests(unittest.TestCase):
         thread = self.main.camera_threads[7]
         top = self.main.lens_views[(7, 'upper')]
         bottom = self.main.lens_views[(7, 'lower')]
-        top.close_button.click()
+        self.main.multi_view_close_buttons[(7, 'upper')][1].click()
         self.assertTrue(top.isHidden())
         self.assertIs(self.main.lens_views[(7, 'lower')], bottom)
         self.assertTrue(bottom.isVisible())
@@ -232,7 +232,7 @@ class LensIntegrationTests(unittest.TestCase):
         bottom = self.main.lens_views[(7, 'lower')]
         bottom.move_requested.emit('right')
         controller.move.assert_called_once_with('right')
-        bottom.close_button.click()
+        self.main.multi_view_close_buttons[(7, 'lower')][1].click()
         controller.stop.assert_called()
 
     def test_stop_clears_both_tiles_without_removing_selection(self):
@@ -354,8 +354,8 @@ class LensIntegrationTests(unittest.TestCase):
 
     def test_closing_both_halves_deselects_camera_without_stopping_stream(self):
         self.main.on_camera_selection_changed(7, True)
-        self.main.lens_views[(7, 'upper')].close_button.click()
-        self.main.lens_views[(7, 'lower')].close_button.click()
+        self.main.multi_view_close_buttons[(7, 'upper')][1].click()
+        self.main.multi_view_close_buttons[(7, 'lower')][1].click()
         self.assertNotIn(7, self.main.selected_camera_ids)
         self.assertFalse(self.main.camera_widgets[7].view_checkbox.isChecked())
         self.assertFalse(self.main.lens_views)
@@ -365,6 +365,29 @@ class LensIntegrationTests(unittest.TestCase):
         with patch('main_window.CameraThread'), patch.object(self.main, '_prebuffer_seconds', return_value=0):
             self.main._start_camera_thread(CAMERA)
         self.assertFalse(self.main.lens_views)
+
+    def test_wheel_zooms_normal_tile_and_double_click_resets(self):
+        from PyQt6.QtCore import QPoint
+        self.select([8, 9])
+        frame = np.zeros((200, 160, 3), dtype=np.uint8)
+        self.main.update_camera_frame(frame, 8)
+        self.main.update_camera_frame(frame, 9)
+        label = self.main.multi_view_labels[8]
+        pos = QPointF(label.frame_display_rect().center())
+        event = QWheelEvent(pos, pos, QPoint(), QPoint(0, 120), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+        QApplication.sendEvent(label, event)
+        self.assertIn(8, self.main.preview_crops)
+        self.assertNotIn(9, self.main.preview_crops)
+        label.double_clicked.emit(8)
+        self.assertNotIn(8, self.main.preview_crops)
+
+    def test_lens_tiles_have_only_overlay_close_button(self):
+        self.select([7, 8])
+        for key in ((7, 'upper'), (7, 'lower')):
+            self.assertIn(key, self.main.multi_view_close_buttons)
+            label, _btn = self.main.multi_view_close_buttons[key]
+            self.assertIs(label, self.main.lens_views[key].label)
 
 
 if __name__ == '__main__':

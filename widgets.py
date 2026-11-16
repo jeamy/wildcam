@@ -129,6 +129,23 @@ def rgb_to_pixmap(rgb) -> QPixmap:
     return pixmap
 
 
+def zoom_crop(frame_h: int, frame_w: int, crop_rect: QRect | None, factor: float,
+              anchor: tuple[float, float] | None = None) -> QRect | None:
+    """Crop rect after zooming by factor around anchor (relative x/y), None for the full frame."""
+    if factor <= 0:
+        return QRect(crop_rect) if crop_rect is not None else None
+    source = QRect(crop_rect) if crop_rect is not None else QRect(0, 0, frame_w, frame_h)
+    x_ratio, y_ratio = anchor if anchor is not None else (0.5, 0.5)
+    new_w = max(min(16, frame_w), min(frame_w, round(source.width() / factor)))
+    new_h = max(min(16, frame_h), min(frame_h, round(source.height() / factor)))
+    if new_w == frame_w and new_h == frame_h:
+        return None
+    x = round(source.x() + x_ratio * (source.width() - new_w))
+    y = round(source.y() + y_ratio * (source.height() - new_h))
+    return QRect(max(0, min(frame_w - new_w, x)),
+                 max(0, min(frame_h - new_h, y)), new_w, new_h)
+
+
 PROXY_STATUS_COLORS = {
     "ready": "#4caf50",
     "unreachable": "#ff9800",
