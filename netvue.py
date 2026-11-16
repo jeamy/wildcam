@@ -16,6 +16,8 @@ Command body: JSON array of units {"Q": type, "V": version, "P": [...]}
     login           Q=1  V=1  P=[local_key, random, user, ip, port]
     select channel  Q=3  V=2  P=[1 (live), [[1, q], [2, q]], [start, end]]
     heartbeat       Q=15 V=1  P=[]
+    discovery (UDP port 36868) Q=8 V=2 P=[]; reply A=8 V=2,
+                    P=[serial, firmware, ip, tcp_port, local_key, ...]
     error (camera)  A=11       P=[code]  1 = key invalid, 4 = too many sessions
 
 Media body: byte 0 = frame_type << 4 | flags (bit0 key frame),
@@ -25,6 +27,8 @@ bytes 1..4 = pts (uint32 LE), rest = payload. frame_type 1 = H.264 video
 The local key and user id are stored by the Netvue app per camera and can be
 read from the app log (``adb logcat | grep NvCameraLANService``) while the
 live view is open: ``doLogin ... user:<USER>, ... localKey:<KEY>``.
+On key rejection, the client fetches the current key directly from the same
+camera via UDP discovery and retries once. No cloud or phone is needed.
 """
 
 from __future__ import annotations
@@ -48,6 +52,8 @@ CMD_LOGIN = 1
 CMD_SELECT_CHANNEL = 3
 CMD_ERROR = 11
 CMD_HEARTBEAT = 15
+CMD_DISCOVERY = 8
+DISCOVERY_PORT = 36868
 
 # P[0] of an error unit (ENvCameraCMDError in the app)
 CAMERA_ERRORS = {
@@ -68,7 +74,9 @@ _SECONDS_PER_YEAR = 365 * 24 * 3600
 
 
 class NetvueError(Exception):
-    pass
+    def __init__(self, message: str, code: int | None = None):
+        super().__init__(message)
+        self.code = code
 
 
 def is_netvue_url(url: str) -> bool:
@@ -139,6 +147,54 @@ def probe_netvue(host: str, port: int = DEFAULT_PORT, timeout: float = 2.0) -> b
             return isinstance(units, list) and bool(units) and isinstance(units[0], dict) and "A" in units[0]
     except (OSError, ValueError):
         return False
+
+
+def discover_local_key(host: str, port: int = DEFAULT_PORT, timeout: float = 3.0) -> str:
+    """Fetch the current key via unicast UDP from this camera only.
+
+    A connected UDP socket filters other senders. Also check the advertised
+    TCP endpoint so a reply for a different service cannot replace our key.
+    Retry once on packet loss; never broadcast or log credentials.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(timeout / 2)
+        sock.connect((host, DISCOVERY_PORT))
+        camera_ip = sock.getpeername()[0]
+        request = _command({"Q": CMD_DISCOVERY, "V": 2, "P": []})
+        for _ in range(2):
+            sock.send(request)
+            deadline = time.monotonic() + timeout / 2
+            while time.monotonic() < deadline:
+                sock.settimeout(max(0.001, deadline - time.monotonic()))
+                try:
+                    data = sock.recv(65535)
+                except socket.timeout:
+                    break
+                if len(data) < 16:
+                    continue
+                size, _seq, _crc, flag, ptype = struct.unpack("<IIIHH", data[:16])
+                if ptype != TYPE_COMMAND or flag or size != len(data) - 16:
+                    continue
+                try:
+                    units = json.loads(data[16:])
+                except (ValueError, UnicodeError):
+                    continue
+                if not isinstance(units, list):
+                    continue
+                for unit in units:
+                    if not isinstance(unit, dict):
+                        continue
+                    if unit.get("A") != CMD_DISCOVERY or unit.get("V") != 2 or unit.get("C") != 0:
+                        continue
+                    params = unit.get("P")
+                    if not isinstance(params, list) or len(params) < 5:
+                        continue
+                    if params[2] != camera_ip or params[3] != port:
+                        continue
+                    key = params[4]
+                    if isinstance(key, str) and key and key != "null":
+                        return key
+    raise NetvueError("local key discovery failed: no valid reply on UDP port 36868")
 
 
 class NetvueClient:
@@ -213,10 +269,27 @@ class NetvueClient:
                 if kind == CMD_ERROR:
                     params = unit.get("P") or [0]
                     code = params[0] if params else 0
-                    raise NetvueError(CAMERA_ERRORS.get(code, f"camera error {code}"))
+                    raise NetvueError(CAMERA_ERRORS.get(code, f"camera error {code}"), code=code)
         raise NetvueError(f"no answer from camera (waiting for {ack_type})")
 
     def login(self):
+        try:
+            self._login_once()
+        except NetvueError as exc:
+            if exc.code != 1:
+                raise
+            self.close()
+            try:
+                self.key = discover_local_key(self.host, self.port, min(self.timeout, 3.0))
+            except (OSError, NetvueError) as discovery_error:
+                raise NetvueError(
+                    "local key invalid; automatic refresh failed "
+                    "(camera must be reachable on UDP port 36868)"
+                ) from discovery_error
+            self.connect()
+            self._login_once()  # exactly one retry, even if the fresh key is rejected
+
+    def _login_once(self):
         unit = {"Q": CMD_LOGIN, "V": 1,
                 "P": [self.key, random.randint(-2**31, 2**31 - 1), self.user, self.host, self.port]}
         self._send(_command(unit))
@@ -258,10 +331,14 @@ class NetvueClient:
             return frame_type, key_frame, pts, body[5:]
 
     def open_live(self, audio: bool = False):
-        self.connect()
-        self.login()
-        self.start_live(audio=audio)
-        return self
+        try:
+            self.connect()
+            self.login()
+            self.start_live(audio=audio)
+            return self
+        except Exception:
+            self.close()
+            raise
 
 
 class NetvueBridge:
@@ -312,6 +389,7 @@ class NetvueBridge:
         client = NetvueClient(p["host"], p["user"], p["key"], p["port"], p["quality"])
         self._client = client
         client.open_live(audio=False)
+        p["key"] = client.key  # keep refreshed key for subsequent bridge connections
         self.error = None
         started = False
         while self._running:
@@ -340,15 +418,48 @@ _LOGIN_LOG = re.compile(
 
 
 def urls_from_app_log(text: str) -> list[str]:
-    """netvue:// URLs from Netvue app log lines (``adb logcat -d``)."""
-    urls = []
+    """netvue:// URLs from Netvue app log lines (``adb logcat -d``).
+
+    The camera rotates its local key from time to time (the app learns the new
+    one over the cloud), so only the latest key per camera is returned.
+    """
+    latest: dict[tuple[str, str, int], str] = {}
     for match in _LOGIN_LOG.finditer(text):
         if match["key"] == "null":
             continue
-        url = build_netvue_url(match["host"], match["user"], match["key"], int(match["port"]))
-        if url not in urls:
-            urls.append(url)
-    return urls
+        ident = (match["user"], match["host"], int(match["port"]))
+        latest.pop(ident, None)  # re-insert: order by last login
+        latest[ident] = build_netvue_url(match["host"], match["user"], match["key"], ident[2])
+    return list(latest.values())
+
+
+def update_config_keys(config_path: str, urls: list[str]) -> list[str]:
+    """Write the local keys of ``urls`` into matching netvue cameras of a
+    WildCam camera_config.json (same user, host and port; quality is kept).
+    Returns the names of the updated cameras. A backup is written first."""
+    import shutil
+
+    with open(config_path, encoding="utf-8") as f:
+        config = json.load(f)
+    fresh = {}
+    for url in urls:
+        p = parse_netvue_url(url)
+        fresh[(p["user"], p["host"], p["port"])] = p["key"]
+    updated = []
+    for cam in config.get("cameras", []):
+        url = cam.get("url", "")
+        if not is_netvue_url(url):
+            continue
+        p = parse_netvue_url(url)
+        key = fresh.get((p["user"], p["host"], p["port"]))
+        if key and key != p["key"]:
+            cam["url"] = build_netvue_url(p["host"], p["user"], key, p["port"], p["quality"])
+            updated.append(cam.get("name") or p["host"])
+    if updated:
+        shutil.copy2(config_path, f"{config_path}.before-netvue-key-{time.strftime('%Y%m%d-%H%M%S')}")
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+    return updated
 
 
 def _main():
@@ -357,12 +468,17 @@ def _main():
     import sys
 
     if len(sys.argv) >= 2 and sys.argv[1] == "from-log":
-        # adb logcat -d | python netvue.py from-log
-        urls = urls_from_app_log(sys.stdin.read())
+        # adb logcat -d | python netvue.py from-log [--update camera_config.json]
+        # logcat contains arbitrary bytes from other apps: never fail on decoding
+        urls = urls_from_app_log(sys.stdin.buffer.read().decode("utf-8", "replace"))
         if not urls:
             print("no Netvue login found - open the live view in the Netvue app first", file=sys.stderr)
             sys.exit(1)
         print("\n".join(urls))
+        if len(sys.argv) >= 4 and sys.argv[2] == "--update":
+            updated = update_config_keys(sys.argv[3], urls)
+            print(f"updated: {', '.join(updated)}" if updated else "config already up to date",
+                  file=sys.stderr)
         return
 
     ap = argparse.ArgumentParser(description="Record a few seconds of H.264 from a Netvue camera "

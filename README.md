@@ -15,7 +15,8 @@ It also shows Netvue cameras (e.g. Orb Mini), which have no RTSP, over their loc
 - **Camera types**
   - RTSP cameras (Reolink, Tapo, other ONVIF/RTSP cameras)
   - Reolink WLAN/battery cameras via ReolinkProxy
-  - Netvue cameras via their local LAN protocol (`netvue://` URL, see [Netvue cameras](#netvue-cameras))
+  - Netvue cameras via their local LAN protocol, with automatic local key refresh
+    (`netvue://` URL, see [Netvue cameras](#netvue-cameras))
 - **Recording & snapshots**
   - Default recordings folder: `~/Videos/Reolink`
   - Snapshots are stored in `~/Videos/Reolink/snapshots`
@@ -425,11 +426,16 @@ The automatic result can be overridden per camera in the edit dialog
 
 ## Netvue cameras
 
-Netvue cameras (e.g. **Orb Mini**) have no RTSP, ONVIF or web interface; the
-only open port is TCP **5555**. The Netvue app streams live video over this
-port directly in the LAN with a small proprietary protocol, which WildCam
-speaks as well (`netvue.py`): login with the app's **local key**, then H.264
-video (1920×1080 on the Orb Mini). Nothing on the camera is changed.
+Netvue cameras (e.g. **Orb Mini**) have no RTSP, ONVIF or web interface.
+They use TCP **5555** for live video and UDP **36868** for local discovery.
+The Netvue app streams directly in the LAN with a small proprietary protocol,
+which WildCam speaks as well (`netvue.py`): login with the app's **local key**,
+then H.264 video (1920×1080 on the Orb Mini). Nothing on the camera is changed.
+
+If the camera rejects an outdated key, WildCam fetches the current key directly
+from that camera over UDP and retries once. This works without a phone, adb,
+Netvue account credentials or cloud access. The user ID and camera IP must
+still be configured correctly.
 
 Camera URL:
 
@@ -452,14 +458,24 @@ debugging*) or USB debugging enabled:
    adb logcat -d | python3 netvue.py from-log
    ```
 
-   This prints the complete `netvue://` URL for every camera the app has
-   opened. Without the source checkout, search the log manually:
-   `adb logcat -d | grep doLogin` shows `user:<USER> ... localKey:<KEY>`.
+   This prints the complete `netvue://` URL (latest key) for every camera
+   the app has opened. To write the key straight into the config (matching
+   user/IP, backup is made; close WildCam first, it saves its config on exit):
+
+   ```bash
+   adb logcat -d | python3 netvue.py from-log --update camera_config.json
+   ```
+
+   Without the source checkout, search the log manually:
+   `adb logcat -d | grep doLogin` shows `user:<USER> ... localKey:<KEY>`
+   (use the last line; the key rotates).
 
 The local key is a password for the camera's video: keep it private. It is
 stored only in your local `camera_config.json` (gitignored) like RTSP
 passwords; there is no separate key file. Raw test recordings (`*.h264`)
-are gitignored as well.
+are gitignored as well. Since local discovery can return the video key,
+keep these cameras on a trusted LAN or isolated camera network; do not expose
+TCP 5555 or UDP 36868 to the internet.
 
 ### Adding the camera
 
@@ -482,9 +498,17 @@ Notes:
   cameras. Audio is not used. Opening the stream takes about 5 s.
 - Pan/tilt (the Orb Mini can pan) is not supported yet; it would need the
   Netvue control commands.
-- If the camera rejects the key (*local key invalid*), open the live view in
-  the Netvue app again and read the key anew. A Netvue firmware or app
-  update may change the protocol.
+- **Automatic local key refresh:** If the camera rejects a stale key,
+  WildCam queries that camera directly via UDP **36868** (discovery command
+  `Q=8, V=2`) and retries the login once with the returned key. No Netvue
+  cloud connection, account password or phone is required for this refresh.
+  The bridge keeps the fresh key in memory; the config is not rewritten.
+  On a later start an old configured key is refreshed again if necessary.
+  Only key-rejection errors trigger this; other errors are reported normally.
+  Allow UDP 36868 to the camera and its replies through the firewall. If
+  discovery is unavailable or unsupported, the app/log method above remains
+  a manual fallback. A camera reset may also change its IP; that still needs
+  updating in the config. Firmware updates may change the protocol.
 - Test without WildCam: `python3 netvue.py <ip> --user <USER> --key <KEY>`
   saves 8 s of raw H.264 to `netvue_test.h264`.
 
