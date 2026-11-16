@@ -382,6 +382,17 @@ class LensIntegrationTests(unittest.TestCase):
         label.double_clicked.emit(8)
         self.assertNotIn(8, self.main.preview_crops)
 
+    def test_lens_ptz_pad_only_visible_when_expanded(self):
+        self.select([7, 8])
+        bottom = self.main.lens_views[(7, 'lower')]
+        self.assertFalse(bottom.ptz_pad.isVisible())
+        bottom.label.double_clicked.emit(7)
+        self.app.processEvents()
+        self.assertTrue(bottom.ptz_pad.isVisible())
+        bottom.label.double_clicked.emit(7)
+        self.app.processEvents()
+        self.assertFalse(bottom.ptz_pad.isVisible())
+
     def test_lens_tiles_have_only_overlay_close_button(self):
         self.select([7, 8])
         for key in ((7, 'upper'), (7, 'lower')):

@@ -2532,6 +2532,7 @@ class MainWindow(QMainWindow):
             if half is not None:
                 view = self._lens_view(camera_id, half)
                 key = (camera_id, half)
+                view.set_expanded(self.zoomed_lens_key == key)
                 self._create_multi_view_close_button(
                     key, view.label, lambda k=key: self._close_lens_view(k))
                 row.addWidget(view, 1)

@@ -133,6 +133,12 @@ class LensView(QWidget):
                               max(0, self.label.height() - self.ptz_pad.height() - 10))
             self.ptz_pad.raise_()
 
+    def set_expanded(self, expanded):
+        if self.ptz_pad is not None:
+            self.ptz_pad.setVisible(bool(expanded))
+            if expanded:
+                self._position_ptz()
+
     def _toggle_ptz(self, expanded):
         if not expanded:
             self.stop_requested.emit()
