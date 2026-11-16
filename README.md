@@ -1,7 +1,7 @@
 # wildcam
 
 `wildcam` is a PyQt6-based multi-camera viewer optimized for parallel RTSP streams (e.g. Reolink).
-It also shows Netvue cameras (e.g. Orb Mini), which have no RTSP, over their local LAN protocol.
+It also shows Netvue cameras (e.g. Orb Mini) and V380/Macrovideo cameras (D57) over their local LAN protocols.
 
 ## Features
 
@@ -411,7 +411,8 @@ Important:
 
 When the selected camera can pan/tilt, a control cross appears in the
 bottom-right corner of the big preview: press and hold an arrow to move,
-release to stop. The ✥ button collapses/expands the cross (remembered).
+release to stop. V380/D57 uses bounded short pulses as described below. The ✥
+button collapses/expands the cross (remembered).
 
 Detection (runs once in the background, stored as `"ptz"` per camera):
 
@@ -423,6 +424,54 @@ Detection (runs once in the background, stored as `"ptz"` per camera):
 
 The automatic result can be overridden per camera in the edit dialog
 (*Pan/tilt camera*).
+
+## V380 / Macrovideo cameras (D57)
+
+WildCam supports local video from the D57 tested with **V380 Pro**, using TCP
+**8800**. No RTSP service or firmware modification is required. `v380.py`
+authenticates with the **local device user and password**, reassembles and
+AES-decrypts the media, and serves it on loopback for OpenCV/FFmpeg. The tested
+D57 delivers **H.265/HEVC, 2304 × 2592, 12 fps**. Its full native frame is retained without cropping.
+
+1. Install/update dependencies: `python -m pip install -r requirements.txt`
+   (`cryptography` is required for V380 authentication and video).
+2. Restart WildCam after updating the source.
+3. Run **Auto-Discover** with the local device user (usually `admin`) and device
+   password. The scan recognizes V380 by its UDP protocol response and includes
+   its device ID. Select the camera and add it.
+4. Alternatively use **Edit → Quick editor**: select path **`v380`**, enter IP,
+   port **8800**, local username/password and device ID, then **Build URL**.
+   Leave the device ID empty to discover it locally when connecting.
+
+URL format (percent-encode special characters in credentials):
+
+```text
+v380://<user>:<device-password>@<ip>:8800?device_id=<numeric-id>&quality=hd
+```
+
+`quality=sd` requests the lower quality stream. Editing an existing URL preserves
+its quality. Credentials are stored in the ignored `camera_config.json`, like
+other camera URLs. The V380 cloud account is not used by this client.
+
+Supported device versions: **31/32**, communication version **20**; live validation
+was performed on the D57 with device version **32**.
+Other protocol versions are explicitly rejected. A rejected username, password
+or device ID stops automatic retries until the camera is started again after
+correcting its settings. Network failures reconnect through WildCam's usual
+stream loop. The D57's **upper view is fixed**, and its **lower view moves**.
+Local PTZ uses the authenticated video connection, so start the stream before
+using the control cross. Each press sends a short movement pulse with an automatic
+stop after **0.35 seconds**; releasing the arrow or closing the session stops it
+sooner. Long holds therefore move in bounded steps rather than continuously.
+Earlier D57 configuration entries automatically gain `ptz: true` and
+`ptz_backend: v380` on the next startup; explicit manual opt-outs are preserved.
+Other V380 models can be marked as pan/tilt in the edit dialog after verification.
+Audio is not implemented.
+Concurrent phone access and long-term stability remain unverified.
+
+Offline tests: `python -m unittest discover -s tests -v`.
+See [D57 analysis and live validation](docs/d57-v380-analysis.md) for protocol
+references, test evidence and remaining limits.
 
 ## Netvue cameras
 

@@ -3,6 +3,7 @@
 Backends:
 - ONVIF (Tapo & co., and ReolinkProxy >= 0.2.7 at 127.0.0.1:8002)
 - Reolink HTTP API (native Reolink cameras without proxy)
+- V380 LAN (authenticated live-video connection, movable lower lens on D57)
 
 All network calls block; PtzController runs them on its own worker thread
 so the GUI never waits for a camera.
@@ -22,6 +23,7 @@ from camera_utils import (
     is_reolink_camera,
 )
 from netvue import is_netvue_url
+from v380 import is_v380_url
 from onvif import ONVIF_PORTS, OnvifClient, find_onvif_service
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -49,7 +51,7 @@ def camera_has_ptz(camera: dict) -> bool:
 def needs_ptz_detection(camera: dict) -> bool:
     url = camera.get("url", "")
     # Netvue: no ONVIF/HTTP API; pan/tilt would need the Netvue protocol.
-    return "ptz" not in camera and not is_proxy_stream_url(url) and not is_netvue_url(url)
+    return "ptz" not in camera and not is_proxy_stream_url(url) and not is_netvue_url(url) and not is_v380_url(url)
 
 
 # --------------------------------------------------------------------------
@@ -145,9 +147,39 @@ class ReolinkHttpPtzBackend:
         self._command("Stop")
 
 
-def backend_for_camera(camera: dict):
+class V380PtzBackend:
+    """Use the current video session; never create an extra camera connection."""
+    def __init__(self, client_provider=None):
+        self.client_provider = client_provider or (lambda: None)
+        self._active_client = None
+
+    def move(self, direction):
+        client = self.client_provider()
+        if client is None:
+            from i18n import tr
+            raise RuntimeError(tr("ptz.v380.start_video"))
+        if self._active_client is not None and self._active_client is not client:
+            self._active_client.stop_ptz()
+        self._active_client = client
+        client.move_ptz(direction)
+
+    def stop(self):
+        client = self._active_client or self.client_provider()
+        if client is not None:
+            client.stop_ptz(force=True)
+        self._active_client = None
+
+    def close(self):
+        client, self._active_client = self._active_client, None
+        if client is not None:
+            client.stop_ptz()
+
+
+def backend_for_camera(camera: dict, v380_client_provider=None):
     """Build the PTZ backend for a camera (no network access)."""
     url = camera.get("url", "")
+    if is_v380_url(url):
+        return V380PtzBackend(v380_client_provider)
     if is_proxy_stream_url(url):
         profile = f"{_reolinkproxy_camera_name(camera.get('name', ''))}_main"
         return OnvifPtzBackend(PROXY_ONVIF_URL, profile_token=profile)
@@ -214,7 +246,7 @@ def detect_ptz(camera: dict) -> dict | None:
     """Detect pan/tilt support. Returns camera fields to store, or None if
     the camera could not be asked (offline, wrong credentials, ...)."""
     url = camera.get("url", "")
-    if is_proxy_stream_url(url) or is_netvue_url(url):
+    if is_proxy_stream_url(url) or is_netvue_url(url) or is_v380_url(url):
         return None
     host, _port, username, password = _parse_rtsp_url(url)
     if not host:
@@ -269,6 +301,12 @@ class PtzController:
                 except queue.Empty:
                     break
             if None in items:
+                close = getattr(self.backend, 'close', None)
+                if close is not None:
+                    try:
+                        close()
+                    except Exception:
+                        pass
                 return
             action, direction = items[-1]  # only the newest command matters
             try:

@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 )
 
 from camera_utils import _build_rtsp_url, camera_hosts, find_matching_camera
+from v380 import build_v380_url, is_v380_url, parse_v380_url, V380Error
 from netvue import DEFAULT_PORT as NETVUE_PORT, build_netvue_url, is_netvue_url, parse_netvue_url
 
 # Pseudo path in the URL builder that switches to a netvue:// URL.
@@ -124,14 +125,24 @@ class CameraEditDialog(QDialog):
             "stream1",
             "live",
             NETVUE_PATH,
+            "v380",
         ])
         self.path_combo.setEditable(True)
         builder_layout.addWidget(self.path_combo, 2, 1, 1, 3)
         
+        self.device_id_label = QLabel(tr("dialog.edit.device_id"))
+        builder_layout.addWidget(self.device_id_label, 3, 0)
+        self.device_id_input = QLineEdit()
+        self.device_id_input.setPlaceholderText(tr("dialog.edit.device_id_ph"))
+        builder_layout.addWidget(self.device_id_input, 3, 1, 1, 3)
+        self._v380_quality = 'hd'
+        self.path_combo.currentTextChanged.connect(self._update_v380_fields)
+        self._update_v380_fields(self.path_combo.currentText())
+
         build_btn = QPushButton(tr("dialog.edit.build_url"))
         build_btn.clicked.connect(self.build_url)
         build_btn.setStyleSheet("background-color: #1976d2; color: white;")
-        builder_layout.addWidget(build_btn, 3, 0, 1, 4)
+        builder_layout.addWidget(build_btn, 4, 0, 1, 4)
         
         builder_group.setLayout(builder_layout)
         layout.addWidget(builder_group)
@@ -149,9 +160,27 @@ class CameraEditDialog(QDialog):
         
         self.setLayout(layout)
     
+    def _update_v380_fields(self, path):
+        self.device_id_label.setVisible(path == 'v380')
+        self.device_id_input.setVisible(path == 'v380')
+        self.ptz_checkbox.setToolTip(tr('ptz.v380.lower_lens') if path == 'v380' else '')
+
     def parse_current_url(self):
         """Aktuellen URL in Felder zerlegen (Zugangsdaten URL-dekodiert)."""
         url = self.camera_data.get('url', '')
+        if is_v380_url(url):
+            try:
+                params = parse_v380_url(url)
+            except V380Error:
+                return
+            self.ip_input.setText(params['host'])
+            self.port_input.setText(str(params['port']))
+            self.username_input.setText(params['user'])
+            self.password_input.setText(params['password'])
+            self.device_id_input.setText(str(params['device_id'] or ''))
+            self._v380_quality = params['quality']
+            self.path_combo.setCurrentText('v380')
+            return
         if is_netvue_url(url):
             try:
                 params = parse_netvue_url(url)
@@ -187,11 +216,22 @@ class CameraEditDialog(QDialog):
         ip = self.ip_input.text().strip()
         port = self.port_input.text().strip() or "554"
         username = self.username_input.text().strip()
-        password = self.password_input.text().strip()
+        password = self.password_input.text()
         path = self.path_combo.currentText().strip()
         
         if not ip:
             QMessageBox.warning(self, tr("dialog.title.error"), tr("dialog.edit.err_ip"))
+            return
+
+        if path == 'v380':
+            try:
+                url = build_v380_url(ip, username, password, self.device_id_input.text().strip(),
+                                     8800 if port == '554' else int(port), self._v380_quality)
+                parse_v380_url(url)
+            except (V380Error, ValueError) as exc:
+                QMessageBox.warning(self, tr("dialog.title.error"), str(exc))
+                return
+            self.url_input.setText(url)
             return
 
         if path == NETVUE_PATH:

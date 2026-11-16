@@ -13,13 +13,14 @@ import urllib3
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from i18n import tr
+from v380 import DEFAULT_PORT as V380_PORT, discover_v380, build_v380_url
 from netvue import DEFAULT_PORT as NETVUE_PORT, build_netvue_url, probe_netvue
 from onvif import ONVIF_PORTS, probe_onvif_device, ws_discovery
 
 # 9000 = Reolink Baichuan (battery/WLAN cameras often expose nothing else),
 # 2020 = Tapo ONVIF, 8899 = ONVIF on many OEM cameras.
 # 5555 = Netvue LAN protocol (no RTSP/ONVIF, see netvue.py).
-DEFAULT_SCAN_PORTS = (554, 8554, 80, 443, 8000, 9000, 2020, 8899, NETVUE_PORT)
+DEFAULT_SCAN_PORTS = (554, 8554, 80, 443, 8000, 9000, 2020, 8899, NETVUE_PORT, V380_PORT)
 RTSP_PORTS = (554, 8554)
 REOLINK_BAICHUAN_PORT = 9000
 
@@ -209,6 +210,21 @@ def identify_host(ip: str, open_ports: list[int], onvif_info: dict | None,
     Returns None for hosts that do not look like a camera (e.g. routers or
     NAS boxes that only expose HTTP).
     """
+    if V380_PORT in open_ports:
+        try:
+            v380 = discover_v380(ip)
+        except OSError:
+            v380 = None
+        if v380:
+            return {
+                "ip": ip, "ports": sorted(open_ports),
+                "name": tr("camera.default_name.ip", ip=ip),
+                "model": "V380", "manufacturer": "Macrovideo",
+                "uid": str(v380['device_id']), "mac": v380['mac'] or mac,
+                "stream_uri": build_v380_url(ip, username or 'admin', password,
+                                              v380['device_id'], v380['port']),
+                "ptz": False,
+            }
     reolink = reolink_api_info(ip, open_ports, username, password)
     onvif = {}
     if onvif_info or any(port in open_ports for port in ONVIF_PORTS):

@@ -52,6 +52,7 @@ from i18n import set_language, tr
 from notifications import DEFAULT_EMAIL_CONFIG, send_detection_email
 from proxy_status import check_proxy_streams
 from netvue import is_netvue_url
+from v380 import is_v380_url
 from reolinkproxy_manager import ProxyConfigError, generate_proxy_files
 from ptz import PtzController, backend_for_camera, camera_has_ptz, detect_ptz, needs_ptz_detection
 from stream import CameraThread
@@ -906,8 +907,8 @@ class MainWindow(QMainWindow):
     def _build_discovered_camera_entry(self, camera_info: dict, username: str, password: str) -> dict:
         ports = camera_info.get('ports', [])
         is_reolink = (camera_info.get('manufacturer') or '').lower() == 'reolink'
-        if is_netvue_url(camera_info.get('stream_uri', '')):
-            # No credentials from the scan dialog: Netvue needs the app's local key.
+        if is_netvue_url(camera_info.get('stream_uri', '')) or is_v380_url(camera_info.get('stream_uri', '')):
+            # Proprietary URLs already contain their protocol-specific fields.
             url = camera_info['stream_uri']
         elif camera_info.get('stream_uri'):
             # Exact RTSP URL reported by the camera via ONVIF GetStreamUri.
@@ -1087,7 +1088,11 @@ class MainWindow(QMainWindow):
                 except (RuntimeError, AttributeError):
                     pass
 
-            controller = PtzController(backend_for_camera(camera), on_error)
+            def v380_client_provider(camera_id=camera_id):
+                thread = self.camera_threads.get(camera_id)
+                return thread.ptz_client() if thread is not None else None
+
+            controller = PtzController(backend_for_camera(camera, v380_client_provider), on_error)
             self._ptz_controllers[camera_id] = controller
         return controller
 

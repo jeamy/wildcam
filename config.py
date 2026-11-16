@@ -4,6 +4,7 @@ import shutil
 import sys
 
 from camera_utils import normalize_reolinkproxy_camera
+from v380 import normalize_v380_ptz
 from detection import DEFAULT_DETECTION_CONFIG, _app_data_dir
 from notifications import DEFAULT_EMAIL_CONFIG
 
@@ -125,6 +126,7 @@ def repair_cameras(cameras: list[dict], order_custom: bool) -> tuple[list[dict],
     proxy_fixed = False
     for camera in repaired:
         proxy_fixed = normalize_reolinkproxy_camera(camera) or proxy_fixed
+        proxy_fixed = normalize_v380_ptz(camera) or proxy_fixed
     if not order_custom:
         try:
             repaired.sort(key=lambda camera: int(camera.get("id", 0)))
